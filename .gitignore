@@ -1,0 +1,8 @@
+STT/Backend/venv/
+STT/Backend/venvpython3/
+STT/Backend/__pycache__/
+STT/Backend/.env
+STT/Frontend/node_modules/
+STT/Frontend/.next/
+# Optional (recommended)
+.env.local

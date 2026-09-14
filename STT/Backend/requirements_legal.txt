@@ -1,0 +1,45 @@
+# Legal Stenographer System - Python Dependencies
+
+# Core Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# WebSocket Support
+websockets>=12.0
+python-socketio>=5.11.0
+
+# AWS Services
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Async HTTP & File Operations
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+
+# Sarvam AI SDK
+sarvamai>=0.1.0
+
+# Environment & Configuration
+python-dotenv>=1.0.0
+
+# Audio Processing (system requirement: ffmpeg must be installed)
+# No Python package needed - uses system ffmpeg
+
+# Data Handling
+pydantic>=2.10.0
+pydantic-settings>=2.1.0
+
+# Utilities
+python-dateutil>=2.8.2
+
+# Testing (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+httpx>=0.26.0
+
+# Logging & Monitoring (optional)
+colorlog>=6.8.0
+
+# Type Hints
+typing-extensions>=4.9.0

@@ -1,0 +1,59 @@
+# Environment variables (contains API keys and secrets)
+.env
+.env.local
+.env*.local
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Node modules
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Archives
+*.zip
+*.tar.gz
+
+# Audio/Video files (large)
+*.wav
+*.mp3
+*.mp4
+
+# AWS credentials
+.aws/
+
+# Testing
+.pytest_cache/
+coverage/
+*.cover
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Local development
+diarization_output/
+temp/
+tmp/
