@@ -5,16 +5,56 @@ import base64
 import json
 import time
 import uuid
+import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from fastapi import WebSocket
 
 from utils.language_utils import LanguageUtils
 from utils.speaker_utils import identify_speaker
 from services.realtime.command_parser import classify_segment
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """
+    Normalize attribute/key access for SDK objects that may be dicts or typed objects.
+    
+    The Sarvam SDK may deliver events as typed dataclass-like objects (with attributes)
+    or as plain dicts depending on version and context. This helper ensures we can
+    access fields uniformly without TypeError.
+    
+    Args:
+        obj: The object to access (dict or object with attributes)
+        key: The attribute/key name to access
+        default: Default value if key doesn't exist
+    
+    Returns:
+        The value at key/attribute, or default if not found
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 
 class AudioStreamHandler:
+    """
+    Handles audio streaming from frontend and VAD events from Sarvam.
+    
+    Key responsibilities:
+    - Receive base64 PCM audio from frontend WebSocket
+    - Forward audio to VADService for transcription
+    - Process transcription events and broadcast to frontend
+    - Handle voice commands for corrections
+    - Track speaker and language metadata
+    
+    Note: Transcript text is now always English (translated by Sarvam).
+    The original spoken language is provided by the SDK in language_code.
+    """
 
     def __init__(self, session_manager, vad_service, content_correction_handler=None):
         self.session_manager = session_manager
@@ -25,7 +65,12 @@ class AudioStreamHandler:
     # AUDIO INPUT FROM FRONTEND
     # ============================================================
     async def process_audio(self, websocket: WebSocket, data: Dict):
-
+        """
+        Process incoming audio data from the frontend.
+        
+        Frontend sends: {type: "audio_stream", session_id, audio_data: <base64 PCM>}
+        Audio is raw int16 PCM, 16kHz, mono.
+        """
         session_id = data.get("session_id")
         audio_data = data.get("audio_data")
 
@@ -50,13 +95,13 @@ class AudioStreamHandler:
             if len(audio_buffer) % 2 != 0:
                 return
 
-            # Track chunk count
+            # Track chunk count (debug logging at DEBUG level)
             if '_audio_chunk_count' not in session:
                 session['_audio_chunk_count'] = 0
             session['_audio_chunk_count'] += 1
 
-            if session['_audio_chunk_count'] % 10 == 0:
-                print(f"🎤 Audio chunks received: {session['_audio_chunk_count']} (size: {len(audio_buffer)} bytes)")
+            if session['_audio_chunk_count'] % 50 == 0:
+                logger.debug(f"Audio chunks received: {session['_audio_chunk_count']} (size: {len(audio_buffer)} bytes)")
 
             session["current_chunk"].append(audio_buffer)
 
@@ -68,7 +113,7 @@ class AudioStreamHandler:
             )
 
         except Exception as e:
-            print(f"❌ Audio processing error: {e}")
+            logger.exception(f"Audio processing error: {e}")
             await websocket.send_text(json.dumps({
                 "type": "error",
                 "message": "Audio processing failed"
@@ -77,8 +122,18 @@ class AudioStreamHandler:
     # ============================================================
     # VAD EVENT CALLBACK
     # ============================================================
-    async def handle_vad_event(self, session_id: str, event):
-
+    async def handle_vad_event(self, session_id: str, event: Any):
+        """
+        Handle events from the Sarvam VAD stream.
+        
+        Events can be typed SDK objects or dicts. We use _get() to handle both.
+        
+        Event types:
+        - "events": VAD signals (START_SPEECH, END_SPEECH)
+        - "data": Transcription results
+        - "stream_closed": Connection lost (from VADService)
+        - "stream_reconnected": Connection restored (from VADService)
+        """
         if not self.session_manager.exists(session_id):
             return
 
@@ -86,53 +141,96 @@ class AudioStreamHandler:
         websocket = session["websocket"]
 
         try:
-            event_type = getattr(event, "type", "unknown")
+            # Log raw event type for debugging (first few events per session)
+            event_count = session.get("_vad_event_count", 0)
+            session["_vad_event_count"] = event_count + 1
+            if event_count < 5:
+                logger.info(f"VAD event #{event_count} for session={session_id}: type={type(event).__name__}, "
+                           f"keys={list(event.keys()) if isinstance(event, dict) else 'N/A'}")
 
+            # Get event type using normalizer
+            event_type = _get(event, "type", "unknown")
+
+            # Handle synthetic events from VADService
+            if event_type == "stream_closed":
+                reason = _get(event, "reason", "unknown")
+                logger.warning(f"Stream closed for session={session_id}: {reason}")
+                await websocket.send_text(json.dumps({
+                    "type": "stream_status",
+                    "session_id": session_id,
+                    "status": "disconnected" if _get(event, "reason") == "reconnect_failed" else "reconnecting",
+                    "reason": reason,
+                }))
+                return
+
+            if event_type == "stream_reconnected":
+                logger.info(f"Stream reconnected for session={session_id}")
+                await websocket.send_text(json.dumps({
+                    "type": "stream_status",
+                    "session_id": session_id,
+                    "status": "connected",
+                }))
+                return
+
+            # Handle VAD signal events
             if event_type == "events":
-                signal_type = getattr(event.data, "signal_type", None)
+                event_data = _get(event, "data")
+                signal_type = _get(event_data, "signal_type")
 
                 if signal_type == "START_SPEECH":
                     session["speech_in_progress"] = True
+                    logger.debug(f"Speech started for session={session_id}")
 
                 elif signal_type == "END_SPEECH":
                     session["speech_in_progress"] = False
+                    logger.debug(f"Speech ended for session={session_id}")
 
                     if session["current_chunk"]:
                         await self._process_vad_chunk(session_id)
 
+            # Handle transcription data events
             elif event_type == "data":
-                # ----------------------------------------------------------
-                # Risk D defensive assertion — retroactive VAD refinement.
-                #
-                # If two 'data' events arrive < 200ms apart, it may indicate
-                # Sarvam is sending interim→final corrections (not expected
-                # per current SDK docs, but worth surfacing empirically).
-                # ----------------------------------------------------------
+                # Risk D defensive assertion — retroactive VAD refinement
                 now_mono = time.monotonic()
                 last_data_time = session.get("_last_data_event_mono")
                 if last_data_time is not None:
                     gap_ms = (now_mono - last_data_time) * 1000.0
                     if gap_ms < 200.0:
-                        print(
-                            f"⚠️ RISK-D WARNING: Two 'data' events arrived {gap_ms:.1f}ms apart "
-                            f"for session={session_id}. Possible interim→final refinement detected. "
-                            f"Investigate if segment text was retroactively updated."
+                        logger.warning(
+                            f"RISK-D WARNING: Two 'data' events arrived {gap_ms:.1f}ms apart "
+                            f"for session={session_id}. Possible interim→final refinement detected."
                         )
                 session["_last_data_event_mono"] = now_mono
 
-                transcript = getattr(event.data, "transcript", "").strip()
+                event_data = _get(event, "data")
+                transcript = _get(event_data, "transcript", "")
+                if isinstance(transcript, str):
+                    transcript = transcript.strip()
 
                 if transcript:
-                    await self._handle_transcript(session_id, transcript, event.data)
+                    await self._handle_transcript(session_id, transcript, event_data)
+
+            else:
+                logger.debug(f"Unknown event type '{event_type}' for session={session_id}")
 
         except Exception as e:
-            print(f"❌ VAD handle_vad_event: Exception for session={session_id}: {e}")
+            logger.exception(f"VAD handle_vad_event error for session={session_id}: {e}")
 
     # ============================================================
     # TRANSCRIPT HANDLING
     # ============================================================
-    async def _handle_transcript(self, session_id: str, transcript: str, event_data):
-
+    async def _handle_transcript(self, session_id: str, transcript: str, event_data: Any):
+        """
+        Process a transcription result from Sarvam.
+        
+        The transcript is now ALWAYS in English (translated by mode="translate").
+        The original spoken language is available from the SDK's language_code field.
+        
+        Args:
+            session_id: Session identifier
+            transcript: English transcript text
+            event_data: Full event data from SDK (may contain language_code, metrics, etc.)
+        """
         session = self.session_manager.get_session(session_id)
         if not session:
             return
@@ -146,31 +244,37 @@ class AudioStreamHandler:
         # Generate a stable segment_id for this transcript segment
         segment_id = f"seg_{uuid.uuid4().hex[:12]}"
 
-        # Detect language
-        detected_language = LanguageUtils.detect_actual_language(transcript)
-        if not detected_language:
-            detected_language = getattr(event_data, "language_code", "unknown")
+        # ----------------------------------------------------------
+        # Language detection: prefer SDK's language_code (the SPOKEN language),
+        # fall back to LanguageUtils only if SDK doesn't provide one.
+        #
+        # Note: The transcript text is now English, but "language" represents
+        # what the speaker actually said (e.g., "hi-IN" for Hindi input).
+        # ----------------------------------------------------------
+        sdk_language = _get(event_data, "language_code")
+        if sdk_language and sdk_language != "unknown":
+            original_language = sdk_language
+        else:
+            # Fallback to script detection (only used if SDK gives nothing)
+            original_language = LanguageUtils.detect_actual_language(transcript)
+            if not original_language:
+                original_language = "unknown"
 
-        self._update_language_detection(session, detected_language)
+        self._update_language_detection(session, original_language)
 
-        # Run heuristic speaker identification
+        # ----------------------------------------------------------
+        # Speaker identification runs on English text now.
+        # The identify_speaker heuristic looks for phrases like
+        # "my client", "your honor", etc.
+        # ----------------------------------------------------------
         speaker_info = identify_speaker(transcript)
         heuristic_speaker = speaker_info.get("speaker")
 
         # ----------------------------------------------------------
         # Audio-time anchoring (Phase 0, Step 0.3.1)
-        #
-        # The Sarvam SDK's SpeechToTextTranscriptionData carries
-        # metrics.audio_duration — the cumulative seconds of audio
-        # processed up to this transcript emission.
-        # We use this as the segment's audio-position anchor for
-        # time-based matching to post-session diarization segments.
-        #
-        # start_time_seconds: previous segment's audio_end or 0.0
-        # end_time_seconds:   metrics.audio_duration from this event
         # ----------------------------------------------------------
-        metrics = getattr(event_data, "metrics", None)
-        audio_end_time_seconds = getattr(metrics, "audio_duration", None) if metrics else None
+        metrics = _get(event_data, "metrics")
+        audio_end_time_seconds = _get(metrics, "audio_duration") if metrics else None
 
         # Derive start_time from the previous segment's end time
         prev_segments = session.get("segments", [])
@@ -179,67 +283,53 @@ class AudioStreamHandler:
         else:
             start_time_seconds = 0.0
 
-        # If the SDK didn't provide audio_duration, fall back to wall-clock offset.
-        # This is a deliberate fallback pending real SDK timestamps — see pre-check
-        # investigation in EXECUTION_PLAN.md.
+        # If the SDK didn't provide audio_duration, fall back to wall-clock offset
         if audio_end_time_seconds is None:
             end_time_seconds = (datetime.now() - session["start_time"]).total_seconds()
             start_time_seconds = prev_segments[-1].get("end_time_seconds", 0.0) if prev_segments else 0.0
         else:
             end_time_seconds = audio_end_time_seconds
 
-        # ----------------------------------------------------------
-        # Monotonicity assertion for audio-time anchors.
-        #
-        # metrics.audio_duration is documented as cumulative audio
-        # processed. If a new segment's derived start_time is less
-        # than the previous segment's end_time, something is wrong
-        # (stream reconnect, SDK reset, etc.). Log a warning rather
-        # than silently trusting a corrupted anchor chain.
-        # ----------------------------------------------------------
+        # Monotonicity assertion for audio-time anchors
         if prev_segments:
             prev_end = prev_segments[-1].get("end_time_seconds", 0.0)
             if start_time_seconds < prev_end - 0.01:  # small epsilon for float precision
-                print(
-                    f"⚠️ MONOTONICITY WARNING: New segment start_time_seconds={start_time_seconds:.3f} "
+                logger.warning(
+                    f"MONOTONICITY WARNING: New segment start_time_seconds={start_time_seconds:.3f} "
                     f"is less than previous segment end_time_seconds={prev_end:.3f} "
-                    f"for session={session_id}. Possible stream reset or SDK anchor corruption. "
-                    f"Clamping start_time to previous end."
+                    f"for session={session_id}. Clamping start_time to previous end."
                 )
                 start_time_seconds = prev_end
 
         # ----------------------------------------------------------
         # Phase 1, Step 2 — Command detection (pre-broadcast).
         #
-        # Classify BEFORE appending to segments or broadcasting.
-        # If the segment is a voice correction command:
-        #   - Do NOT append to session["segments"].
-        #   - Do NOT broadcast transcription_update.
-        #   - Store the parsed command + segment metadata for Step 3
-        #     (ContentCorrectionHandler) to pick up.
+        # Since transcript is now English, we classify using language="en-IN"
+        # to match English command phrases ("scratch that", "replace with", etc.)
         # ----------------------------------------------------------
-        command = classify_segment(transcript, language=detected_language)
+        command = classify_segment(transcript, language="en-IN")
 
         if command is not None:
-            # This segment is a voice correction command, not content.
+            # This segment is a voice correction command, not content
             command_segment_data = {
                 "segment_id": segment_id,
                 "transcript": transcript,
                 "speaker_heuristic": heuristic_speaker,
                 "speaker_confidence": speaker_info.get("confidence", 0),
                 "timestamp": datetime.now().isoformat(),
-                "language": detected_language,
+                "language": original_language,  # Original spoken language
+                "original_language": original_language,
                 "start_time_seconds": start_time_seconds,
                 "end_time_seconds": end_time_seconds,
-                "command": command,  # {"kind": "scratch"} or {"kind": "replace", "replacement": ...}
+                "command": command,
             }
 
-            print(
-                f"🎯 COMMAND DETECTED in session={session_id}: {command} "
+            logger.info(
+                f"COMMAND DETECTED in session={session_id}: {command} "
                 f"(segment_id={segment_id}, text='{transcript[:60]}')"
             )
 
-            # Dispatch to ContentCorrectionHandler (Phase 1, Step 3).
+            # Dispatch to ContentCorrectionHandler (Phase 1, Step 3)
             if self.content_correction_handler is not None:
                 await self.content_correction_handler.propose(
                     session_id=session_id,
@@ -247,7 +337,6 @@ class AudioStreamHandler:
                     command_segment_data=command_segment_data,
                 )
             else:
-                # Fallback if handler not yet injected (shouldn't happen post-Step 3)
                 await websocket.send_text(json.dumps({
                     "type": "correction_failed",
                     "session_id": session_id,
@@ -261,19 +350,13 @@ class AudioStreamHandler:
         # Normal content path — append and broadcast.
         # ----------------------------------------------------------
 
-        # Add transcript to buffer
+        # Add transcript to buffer (English text)
         session["transcript_buffer"] += f" {transcript}"
 
-        # Phase 1, Step 7 — also append to raw_transcript_buffer (verbatim, never
-        # mutated by content corrections). This is what gets uploaded as transcription.txt.
+        # Phase 1, Step 7 — also append to raw_transcript_buffer
         if "raw_transcript_buffer" not in session:
             session["raw_transcript_buffer"] = ""
         session["raw_transcript_buffer"] += f" {transcript}"
-
-        # Check if manual speaker tags override the heuristic
-        speaker_tags = session.get("speaker_tags", {})
-        # If manual tags exist, we can't map from heuristic to channel here
-        # (that requires diarization). Just pass the heuristic guess for now.
 
         # Store segment in session for later correction support
         segment_data = {
@@ -282,19 +365,22 @@ class AudioStreamHandler:
             "speaker_heuristic": heuristic_speaker,
             "speaker_confidence": speaker_info.get("confidence", 0),
             "timestamp": datetime.now().isoformat(),
-            "language": detected_language,
+            "language": original_language,  # Original spoken language
+            "original_language": original_language,
             "start_time_seconds": start_time_seconds,
             "end_time_seconds": end_time_seconds,
         }
         session["segments"].append(segment_data)
 
         # Send real-time transcript to frontend with segment_id
+        # Note: "transcript" is English, "language" is the SPOKEN language
         response = {
             "type": "transcription_update",
             "session_id": session_id,
             "segment_id": segment_id,
-            "transcript": transcript,
-            "language": detected_language,
+            "transcript": transcript,  # Always English
+            "language": original_language,  # Spoken language (hi-IN, te-IN, etc.)
+            "original_language": original_language,  # Optional field for clarity
             "speaker": heuristic_speaker,
             "speaker_confidence": speaker_info.get("confidence", 0),
             "timestamp": datetime.now().isoformat(),
@@ -309,7 +395,7 @@ class AudioStreamHandler:
     # VAD CHUNK PROCESSING
     # ============================================================
     async def _process_vad_chunk(self, session_id: str):
-
+        """Process accumulated audio chunk on speech end."""
         session = self.session_manager.get_session(session_id)
 
         if not session["current_chunk"]:
@@ -323,7 +409,7 @@ class AudioStreamHandler:
     # LANGUAGE TRACKING
     # ============================================================
     def _update_language_detection(self, session: Dict, detected_language: str):
-
+        """Track language confidence across segments."""
         if not detected_language:
             return
 
