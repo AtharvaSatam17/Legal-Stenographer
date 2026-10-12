@@ -50,20 +50,10 @@ class SessionManager:
                 # Speaker assignment
                 "speaker_tags": {},  # Manual: {"SPEAKER_1": "LAWYER", "SPEAKER_2": "PLAINTIFF"}
                 # Segment tracking with corrections
+                # A segment may also be a lightweight paragraph-break marker:
+                # {"segment_id": ..., "is_paragraph_break": True, "transcript": "", ...}
                 "segments": [],  # List of {segment_id, transcript, speaker_heuristic, timestamp, start_time_seconds, end_time_seconds}
                 "speaker_corrections": {},  # {segment_id: {"role": str, "start_time_seconds": float}}
-                # ----------------------------------------------------------
-                # Content corrections (Phase 1, Step 1)
-                # ----------------------------------------------------------
-                # Append-only history of all content correction lifecycle events.
-                # Each entry is immutable once written. See EXECUTION_PLAN.md for schema.
-                "content_corrections": [],
-                # Proposed corrections awaiting accept/reject/timeout.
-                # Keyed by correction_id. Entries move here on proposal and are
-                # removed on accept/reject/timeout (then appended to content_corrections).
-                "pending_content_corrections": {},
-                # Monotonically increasing counter for generating correction_ids within this session.
-                "content_correction_seq": 0,
                 # VAD state
                 "vad_active": False,
                 "speech_in_progress": False,

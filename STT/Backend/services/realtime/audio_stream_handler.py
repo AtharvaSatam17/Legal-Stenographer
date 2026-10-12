@@ -56,10 +56,9 @@ class AudioStreamHandler:
     The original spoken language is provided by the SDK in language_code.
     """
 
-    def __init__(self, session_manager, vad_service, content_correction_handler=None):
+    def __init__(self, session_manager, vad_service):
         self.session_manager = session_manager
         self.vad_service = vad_service
-        self.content_correction_handler = content_correction_handler
 
     # ============================================================
     # AUDIO INPUT FROM FRONTEND
@@ -302,48 +301,41 @@ class AudioStreamHandler:
                 start_time_seconds = prev_end
 
         # ----------------------------------------------------------
-        # Phase 1, Step 2 — Command detection (pre-broadcast).
+        # "New paragraph" voice command detection (pre-broadcast).
         #
-        # Since transcript is now English, we classify using language="en-IN"
-        # to match English command phrases ("scratch that", "replace with", etc.)
+        # Transcript is always English, so classify using language="en-IN".
+        # A matched command is NOT content: it inserts a paragraph break and
+        # is never broadcast or stored as transcript text.
         # ----------------------------------------------------------
         command = classify_segment(transcript, language="en-IN")
 
-        if command is not None:
-            # This segment is a voice correction command, not content
-            command_segment_data = {
+        if command is not None and command.get("kind") == "paragraph_break":
+            # Record a lightweight paragraph-break marker in the segment list.
+            # It carries no transcript text and is never broadcast as content.
+            # It survives into background processing so format_petition_prose
+            # honors the paragraph boundary in the final output.
+            break_marker = {
                 "segment_id": segment_id,
-                "transcript": transcript,
-                "speaker_heuristic": heuristic_speaker,
-                "speaker_confidence": speaker_info.get("confidence", 0),
+                "is_paragraph_break": True,
+                "transcript": "",
                 "timestamp": datetime.now().isoformat(),
-                "language": original_language,  # Original spoken language
-                "original_language": original_language,
                 "start_time_seconds": start_time_seconds,
                 "end_time_seconds": end_time_seconds,
-                "command": command,
             }
+            session["segments"].append(break_marker)
 
             logger.info(
-                f"COMMAND DETECTED in session={session_id}: {command} "
+                f"PARAGRAPH BREAK command in session={session_id} "
                 f"(segment_id={segment_id}, text='{transcript[:60]}')"
             )
 
-            # Dispatch to ContentCorrectionHandler (Phase 1, Step 3)
-            if self.content_correction_handler is not None:
-                await self.content_correction_handler.propose(
-                    session_id=session_id,
-                    command=command,
-                    command_segment_data=command_segment_data,
-                )
-            else:
-                await websocket.send_text(json.dumps({
-                    "type": "correction_failed",
-                    "session_id": session_id,
-                    "reason": "handler_not_wired",
-                    "command": command,
-                    "command_segment_id": segment_id,
-                }))
+            # Tell the frontend to start a new paragraph. The command segment
+            # itself is never broadcast, so this is how the UI learns of it.
+            await websocket.send_text(json.dumps({
+                "type": "paragraph_break",
+                "session_id": session_id,
+                "segment_id": segment_id,
+            }))
             return  # Do NOT broadcast as transcription_update
 
         # ----------------------------------------------------------

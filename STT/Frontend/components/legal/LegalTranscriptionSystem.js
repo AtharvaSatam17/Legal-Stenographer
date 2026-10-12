@@ -53,16 +53,6 @@ export default function LegalTranscriptionSystem({ user }) {
   // Speaker corrections overlay
   const [speakerCorrections, setSpeakerCorrections] = useState({});
 
-  // =====================================================================
-  // Phase 1, Step 9 — Content correction state
-  // =====================================================================
-  const [pendingCorrections, setPendingCorrections] = useState({});       // {correction_id: {...}}
-  const [appliedCorrections, setAppliedCorrections] = useState({});       // {correction_id: {...}}
-  const [correctionsByTarget, setCorrectionsByTarget] = useState({});      // {segment_id: correction_id}
-  
-  // Track last correction_id for resync (Step 10)
-  const lastSeenCorrectionIdRef = useRef(null);
-  
   // Update speaker mapping when client role changes
   useEffect(() => {
     const clientLabel = caseMetadata.clientRole === 'defendant' ? 'DEFENDANT' : 'PLAINTIFF';
@@ -96,7 +86,6 @@ export default function LegalTranscriptionSystem({ user }) {
         ws.send(JSON.stringify({
           type: 'session_resync',
           session_id: sessionIdRef.current,
-          last_seen_correction_id: lastSeenCorrectionIdRef.current,
         }));
       }
     };
@@ -169,6 +158,16 @@ export default function LegalTranscriptionSystem({ user }) {
       case 'speaker_corrected':
         console.log('✏️ Speaker corrected:', data.segment_id, '→', data.corrected_speaker);
         break;
+
+      case 'paragraph_break':
+        console.log('↵ Paragraph break');
+        // Push a lightweight marker so the display and export start a new
+        // paragraph here. The command text itself is never shown.
+        setMessages(prev => [...prev, {
+          segment_id: data.segment_id,
+          isParagraphBreak: true,
+        }]);
+        break;
         
       case 'session_ended':
         console.log('✅ Session ended:', data.data);
@@ -180,87 +179,23 @@ export default function LegalTranscriptionSystem({ user }) {
         alert('Session ended successfully. Processing in background...');
         break;
 
-      // =============================================================
-      // Phase 1, Step 9 — Content correction messages
-      // =============================================================
-      case 'correction_proposed': {
-        const { correction_id, kind, target_segment_id, original_text, replacement_text, auto_commit_at, command_segment_id } = data;
-        lastSeenCorrectionIdRef.current = correction_id;
-        setPendingCorrections(prev => ({
-          ...prev,
-          [correction_id]: { correction_id, kind, target_segment_id, original_text, replacement_text, auto_commit_at, command_segment_id }
-        }));
-        setCorrectionsByTarget(prev => ({ ...prev, [target_segment_id]: correction_id }));
-        break;
-      }
-
-      case 'correction_applied': {
-        const { correction_id, kind, target_segment_id, original_text, replacement_text, confirmed_by, confirmation_timestamp } = data;
-        lastSeenCorrectionIdRef.current = correction_id;
-        // Move from pending to applied
-        setPendingCorrections(prev => { const n = { ...prev }; delete n[correction_id]; return n; });
-        setAppliedCorrections(prev => ({
-          ...prev,
-          [correction_id]: { correction_id, kind, target_segment_id, original_text, replacement_text, confirmed_by, confirmation_timestamp }
-        }));
-        setCorrectionsByTarget(prev => ({ ...prev, [target_segment_id]: correction_id }));
-        break;
-      }
-
-      case 'correction_rejected': {
-        const { correction_id, target_segment_id } = data;
-        lastSeenCorrectionIdRef.current = correction_id;
-        setPendingCorrections(prev => { const n = { ...prev }; delete n[correction_id]; return n; });
-        setCorrectionsByTarget(prev => { const n = { ...prev }; if (n[target_segment_id] === correction_id) delete n[target_segment_id]; return n; });
-        break;
-      }
-
-      case 'correction_reversed': {
-        const { correction_id, reverses_correction_id, target_segment_id } = data;
-        lastSeenCorrectionIdRef.current = correction_id;
-        // Remove the reversed correction from applied
-        setAppliedCorrections(prev => { const n = { ...prev }; delete n[reverses_correction_id]; return n; });
-        setCorrectionsByTarget(prev => { const n = { ...prev }; if (n[target_segment_id] === reverses_correction_id) delete n[target_segment_id]; return n; });
-        break;
-      }
-
-      case 'correction_failed':
-        console.warn('⚠️ Correction failed:', data.reason, data.message);
-        break;
-
       // Step 10: session resync response
       case 'session_state': {
         console.log('🔄 Session state resync received');
-        // Rebuild local state from server
+        // Rebuild local state from server. Paragraph-break markers are
+        // preserved so the display re-groups into paragraphs after reconnect.
         if (data.segments) {
-          setMessages(data.segments.map(seg => ({
-            segment_id: seg.segment_id,
-            text: seg.transcript,
-            timestamp: seg.timestamp,
-            speaker: seg.speaker_heuristic,
-            speakerConfidence: seg.speaker_confidence || 0,
-          })));
-        }
-        // Rebuild corrections state
-        if (data.content_corrections) {
-          const applied = {};
-          const byTarget = {};
-          for (const entry of data.content_corrections) {
-            if (entry.kind === 'scratch' || entry.kind === 'replace') {
-              applied[entry.correction_id] = entry;
-              byTarget[entry.target_segment_id] = entry.correction_id;
-            }
-          }
-          setAppliedCorrections(applied);
-          setCorrectionsByTarget(prev => ({ ...prev, ...byTarget }));
-        }
-        if (data.pending_content_corrections) {
-          const pending = {};
-          for (const [cid, entry] of Object.entries(data.pending_content_corrections)) {
-            pending[cid] = entry;
-            setCorrectionsByTarget(prev => ({ ...prev, [entry.target_segment_id]: cid }));
-          }
-          setPendingCorrections(pending);
+          setMessages(data.segments.map(seg => (
+            seg.is_paragraph_break
+              ? { segment_id: seg.segment_id, isParagraphBreak: true }
+              : {
+                  segment_id: seg.segment_id,
+                  text: seg.transcript,
+                  timestamp: seg.timestamp,
+                  speaker: seg.speaker_heuristic,
+                  speakerConfidence: seg.speaker_confidence || 0,
+                }
+          )));
         }
         break;
       }
@@ -283,106 +218,7 @@ export default function LegalTranscriptionSystem({ user }) {
   };
   
   // =====================================================================
-  // Content correction actions (Step 9)
-  // =====================================================================
-  const acceptCorrection = (correctionId) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !sessionId) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'content_correction_accept',
-      session_id: sessionId,
-      correction_id: correctionId,
-      staff_username: user?.username || 'staff',
-    }));
-  };
-
-  const rejectCorrection = (correctionId) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !sessionId) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'content_correction_reject',
-      session_id: sessionId,
-      correction_id: correctionId,
-      staff_username: user?.username || 'staff',
-    }));
-  };
-
-  const undoCorrection = (correctionId) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !sessionId) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'content_correction_reverse',
-      session_id: sessionId,
-      correction_id: correctionId,
-      staff_username: user?.username || 'staff',
-    }));
-  };
-
-  const pushScratch = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !sessionId) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'content_correction_push',
-      session_id: sessionId,
-      kind: 'scratch',
-      staff_username: user?.username || 'staff',
-    }));
-  };
-
-  const pushReplace = (replacementText) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !sessionId || !replacementText) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'content_correction_push',
-      session_id: sessionId,
-      kind: 'replace',
-      replacement: replacementText,
-      staff_username: user?.username || 'staff',
-    }));
-  };
-
-  // =====================================================================
-  // Keyboard shortcuts (Step 9 — push-to-command)
-  // =====================================================================
-  const [showReplaceInput, setShowReplaceInput] = useState(false);
-  const replaceInputRef = useRef(null);
-
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      // Ignore when focus is in a text input/textarea
-      const tag = document.activeElement?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-
-      // Ctrl+Shift+S → push scratch
-      if (e.ctrlKey && e.shiftKey && e.key === 'S') {
-        e.preventDefault();
-        if (sessionActive) pushScratch();
-      }
-      // Ctrl+Shift+R → show replace input
-      if (e.ctrlKey && e.shiftKey && e.key === 'R') {
-        e.preventDefault();
-        if (sessionActive) {
-          setShowReplaceInput(true);
-          setTimeout(() => replaceInputRef.current?.focus(), 50);
-        }
-      }
-      // Escape → close replace input
-      if (e.key === 'Escape') {
-        setShowReplaceInput(false);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sessionActive, sessionId]);
-
-  const handleReplaceSubmit = (e) => {
-    e.preventDefault();
-    const text = replaceInputRef.current?.value?.trim();
-    if (text) {
-      pushReplace(text);
-      replaceInputRef.current.value = '';
-    }
-    setShowReplaceInput(false);
-  };
-
-  // =====================================================================
-  // Existing functionality (unchanged)
+  // Existing functionality
   // =====================================================================
 
   // Tag a speaker manually
@@ -507,20 +343,6 @@ export default function LegalTranscriptionSystem({ user }) {
           connectionStatus={connectionStatus} onStartSession={startSession} onStopSession={endSession}
           onPauseAudio={pauseAudioRecording} onResumeAudio={resumeAudioRecording} disabled={isEndingSession}
         />
-
-        {/* Push-to-command replace input overlay */}
-        {showReplaceInput && (
-          <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center" onClick={() => setShowReplaceInput(false)}>
-            <form onSubmit={handleReplaceSubmit} onClick={e => e.stopPropagation()} className="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Replace most recent lawyer statement with:</label>
-              <input ref={replaceInputRef} type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" placeholder="Type replacement text and press Enter..." autoFocus />
-              <div className="flex justify-end gap-2 mt-3">
-                <button type="button" onClick={() => setShowReplaceInput(false)} className="px-3 py-1 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-                <button type="submit" className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">Replace</button>
-              </div>
-            </form>
-          </div>
-        )}
         
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
@@ -530,15 +352,6 @@ export default function LegalTranscriptionSystem({ user }) {
               isEditing={isEditingTranscript}
               onToggleEdit={() => setIsEditingTranscript(!isEditingTranscript)}
               onSave={saveTranscript}
-              onCorrectSpeaker={correctSpeaker}
-              clientRole={caseMetadata.clientRole}
-              sessionActive={sessionActive}
-              pendingCorrections={pendingCorrections}
-              appliedCorrections={appliedCorrections}
-              correctionsByTarget={correctionsByTarget}
-              onAcceptCorrection={acceptCorrection}
-              onRejectCorrection={rejectCorrection}
-              onUndoCorrection={undoCorrection}
             />
           </div>
           
@@ -552,8 +365,6 @@ export default function LegalTranscriptionSystem({ user }) {
           <div className="bg-gray-800 text-white p-4 rounded-lg text-xs font-mono space-y-1">
             <p>Session ID: {sessionId || 'None'} | Connection: {connectionStatus} | Recording: {isRecording ? 'Yes' : 'No'}</p>
             <p>Messages: {messages.length} | Speaker corrections: {Object.keys(speakerCorrections).length}</p>
-            <p>Pending corrections: {Object.keys(pendingCorrections).length} | Applied corrections: {Object.keys(appliedCorrections).length}</p>
-            <p className="text-gray-400">Shortcuts: Ctrl+Shift+S = scratch last | Ctrl+Shift+R = replace last</p>
           </div>
         )}
       </div>

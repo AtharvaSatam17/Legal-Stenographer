@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Edit, Save, RefreshCw } from 'lucide-react';
-import CorrectionOverlay from './CorrectionOverlay';
+import { Edit, Save } from 'lucide-react';
 
 export default function LegalTranscriptPanel({
   messages,
@@ -8,22 +7,10 @@ export default function LegalTranscriptPanel({
   isEditing,
   onToggleEdit,
   onSave,
-  onCorrectSpeaker,
-  clientRole = 'plaintiff',
-  sessionActive,
-  // Phase 1, Step 9 — content correction props
-  pendingCorrections = {},
-  appliedCorrections = {},
-  correctionsByTarget = {},
-  onAcceptCorrection,
-  onRejectCorrection,
-  onUndoCorrection,
 }) {
   const [editedTranscript, setEditedTranscript] = useState(transcript);
   const messagesEndRef = useRef(null);
-  
-  const clientLabel = clientRole === 'defendant' ? 'DEFENDANT' : 'PLAINTIFF';
-  
+
   useEffect(() => {
     setEditedTranscript(transcript);
   }, [transcript]);
@@ -33,40 +20,33 @@ export default function LegalTranscriptPanel({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
   
-  // Speaker color mapping (2-party)
-  const getSpeakerColor = (speaker) => {
-    if (!speaker) return 'text-gray-700 bg-gray-50 border-gray-200';
-    const s = speaker.toUpperCase();
-    if (s === 'LAWYER') return 'text-blue-700 bg-blue-50 border-blue-200';
-    if (s === 'PLAINTIFF' || s === 'DEFENDANT' || s === 'CLIENT') return 'text-amber-700 bg-amber-50 border-amber-200';
-    if (s === 'SPEAKER_1') return 'text-blue-700 bg-blue-50 border-blue-200';
-    if (s === 'SPEAKER_2') return 'text-amber-700 bg-amber-50 border-amber-200';
-    return 'text-gray-700 bg-gray-50 border-gray-200';
-  };
-  
   const handleSave = () => {
     onSave(editedTranscript);
     onToggleEdit();
   };
 
-  // Cycle speaker for a segment
-  const cycleSpeaker = (segmentId, currentSpeaker) => {
-    if (!onCorrectSpeaker || !sessionActive) return;
-    const cycle = ['LAWYER', clientLabel, 'SPEAKER'];
-    const currentIdx = cycle.indexOf(currentSpeaker?.toUpperCase());
-    const nextIdx = (currentIdx + 1) % cycle.length;
-    onCorrectSpeaker(segmentId, cycle[nextIdx]);
+  // Group messages into paragraphs, splitting at each paragraph-break marker.
+  // Each paragraph is an array of segment text strings.
+  const buildParagraphs = () => {
+    const paragraphs = [];
+    let current = [];
+    for (const msg of messages) {
+      if (msg.isParagraphBreak) {
+        if (current.length > 0) {
+          paragraphs.push(current);
+          current = [];
+        }
+        continue;
+      }
+      if (msg.text) current.push(msg.text);
+    }
+    if (current.length > 0) paragraphs.push(current);
+    return paragraphs;
   };
 
-  // Resolve correction state for a segment
-  const getCorrectionForSegment = (segmentId) => {
-    const corrId = correctionsByTarget[segmentId];
-    if (!corrId) return { pending: null, applied: null };
-    if (pendingCorrections[corrId]) return { pending: pendingCorrections[corrId], applied: null };
-    if (appliedCorrections[corrId]) return { pending: null, applied: appliedCorrections[corrId] };
-    return { pending: null, applied: null };
-  };
-  
+  // Number of actual content segments (break markers excluded).
+  const contentSegmentCount = messages.filter((m) => !m.isParagraphBreak).length;
+
   return (
     <div className="bg-white rounded-lg shadow">
       {/* Header */}
@@ -104,37 +84,18 @@ export default function LegalTranscriptPanel({
           </div>
         ) : (
           <div className="max-h-96 overflow-y-auto">
-            {messages.length === 0 ? (
+            {contentSegmentCount === 0 ? (
               <div className="text-center py-12">
                 <p className="text-gray-400 text-lg mb-2">No transcript yet</p>
                 <p className="text-gray-500 text-sm">Transcript will appear here once recording starts...</p>
               </div>
             ) : (
               <div className="text-gray-800 leading-loose text-justify text-[15px]">
-                {messages.map((msg, idx) => {
-                  const { pending, applied } = getCorrectionForSegment(msg.segment_id);
-
-                  return (
-                    <CorrectionOverlay
-                      key={msg.segment_id || idx}
-                      originalText={msg.text}
-                      pendingCorrection={pending}
-                      appliedCorrection={applied}
-                      onAccept={onAcceptCorrection}
-                      onReject={onRejectCorrection}
-                      onUndo={onUndoCorrection}
-                      inline
-                    >
-                      <span className="hover:bg-yellow-50 rounded transition-colors">
-                        {msg.text}
-                      </span>
-                    </CorrectionOverlay>
-                  );
-                }).reduce((acc, el, idx) => {
-                  // Join segments with a space so it reads as continuous prose
-                  if (idx === 0) return [el];
-                  return [...acc, ' ', el];
-                }, [])}
+                {buildParagraphs().map((paragraph, idx) => (
+                  <p key={idx} className="mb-4 last:mb-0">
+                    {paragraph.join(' ')}
+                  </p>
+                ))}
                 <span ref={messagesEndRef} />
               </div>
             )}
@@ -143,14 +104,11 @@ export default function LegalTranscriptPanel({
       </div>
       
       {/* Footer Stats */}
-      {messages.length > 0 && !isEditing && (
+      {contentSegmentCount > 0 && !isEditing && (
         <div className="border-t p-4 bg-gray-50">
           <div className="flex justify-between text-sm text-gray-600">
-            <span>{messages.length} segments</span>
+            <span>{contentSegmentCount} segments</span>
             <span>{transcript.split(' ').filter(Boolean).length} words</span>
-            {sessionActive && (
-              <span className="text-blue-600">Click speaker badge to correct | Ctrl+Shift+S = scratch | Ctrl+Shift+R = replace</span>
-            )}
           </div>
         </div>
       )}

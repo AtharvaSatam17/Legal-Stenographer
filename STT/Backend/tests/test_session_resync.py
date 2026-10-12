@@ -9,10 +9,9 @@ import json
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from datetime import datetime
 from core.session_manager import SessionManager
-from services.realtime.content_correction_handler import ContentCorrectionHandler
 
 
 def setup():
@@ -25,10 +24,6 @@ def setup():
         {"segment_id": "seg_001", "transcript": "First statement.", "speaker_heuristic": "LAWYER",
          "speaker_confidence": 0.75, "timestamp": datetime.now().isoformat(), "language": "en-IN",
          "start_time_seconds": 0.0, "end_time_seconds": 5.0},
-    ]
-    session["content_corrections"] = [
-        {"correction_id": "corr_00001", "kind": "scratch", "target_segment_id": "seg_001",
-         "confirmed_by": "staff"},
     ]
 
     return sm, ws, session, session_id
@@ -58,8 +53,6 @@ async def test_resync_existing_session():
         'type': 'session_state',
         'session_id': session_id,
         'segments': resync_session.get('segments', []),
-        'content_corrections': resync_session.get('content_corrections', []),
-        'pending_content_corrections': resync_session.get('pending_content_corrections', {}),
         'transcript_buffer': resync_session.get('transcript_buffer', ''),
         'session_active': not resync_session.get('ending', False),
     }
@@ -70,7 +63,6 @@ async def test_resync_existing_session():
     assert msg["type"] == "session_state"
     assert msg["session_id"] == session_id
     assert len(msg["segments"]) == 1
-    assert len(msg["content_corrections"]) == 1
     assert msg["session_active"] is True
 
     print("✅ test_resync_existing_session PASSED")
@@ -101,33 +93,29 @@ async def test_resync_missing_session():
 
 @pytest.mark.asyncio
 async def test_resync_updates_websocket_reference():
-    """After resync, the session's websocket ref should point to the new connection."""
+    """Resync swaps the session's websocket ref to the new connection and
+    the rebuilt state payload still carries segments/transcript_buffer."""
     sm, old_ws, session, session_id = setup()
 
     new_ws = AsyncMock()
-    session["websocket"] = new_ws
+    resync_session = sm.get_session(session_id)
+    resync_session["websocket"] = new_ws
 
-    # The handler should now emit corrections to the new websocket
-    handler = ContentCorrectionHandler(session_manager=sm)
+    assert resync_session["websocket"] is new_ws
 
-    # Add another LAWYER segment so propose works
-    session["segments"].append({
-        "segment_id": "seg_002", "transcript": "Second statement.", "speaker_heuristic": "LAWYER",
-        "speaker_confidence": 0.75, "timestamp": datetime.now().isoformat(), "language": "en-IN",
-        "start_time_seconds": 5.0, "end_time_seconds": 10.0,
-    })
+    state_payload = {
+        'type': 'session_state',
+        'session_id': session_id,
+        'segments': resync_session.get('segments', []),
+        'transcript_buffer': resync_session.get('transcript_buffer', ''),
+        'session_active': not resync_session.get('ending', False),
+    }
+    await resync_session["websocket"].send_text(json.dumps(state_payload))
 
-    await handler.propose(session_id, {"kind": "scratch"}, {
-        "segment_id": "seg_cmd", "transcript": "scratch that",
-        "speaker_heuristic": "SPEAKER", "speaker_confidence": 0.3,
-        "timestamp": datetime.now().isoformat(), "language": "en-IN",
-        "start_time_seconds": 10.0, "end_time_seconds": 11.0,
-    })
-
-    # The correction_proposed should have been sent to new_ws, not old_ws
     new_ws.send_text.assert_called()
     msg = json.loads(new_ws.send_text.call_args_list[-1][0][0])
-    assert msg["type"] == "correction_proposed"
+    assert msg["type"] == "session_state"
+    assert len(msg["segments"]) == 1
 
     print("✅ test_resync_updates_websocket_reference PASSED")
 

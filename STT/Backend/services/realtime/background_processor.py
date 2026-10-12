@@ -63,8 +63,6 @@ class BackgroundProcessor:
             legal_transcript = None
             legal_transcript_json = None
 
-            content_corrections = session_data.get("content_corrections", [])
-
             # --- DIARIZATION PIPELINE (DISABLED) -----------------------------
             # if session_data.get("audio_buffer"):
             #     try:
@@ -92,7 +90,6 @@ class BackgroundProcessor:
             #                 legal_transcript = legal_formatter.format_legal_transcript(
             #                     diarized_segments=segments,
             #                     speaker_corrections=speaker_corrections,
-            #                     content_corrections=content_corrections,
             #                     remove_fillers=False,
             #                     include_duration=False
             #                 )
@@ -109,7 +106,6 @@ class BackgroundProcessor:
             #                         "duration_seconds": (session_data["end_time"] - session_data["start_time"]).total_seconds()
             #                     },
             #                     speaker_corrections=speaker_corrections,
-            #                     content_corrections=content_corrections,
             #                     remove_fillers=False
             #                 )
             #
@@ -137,7 +133,6 @@ class BackgroundProcessor:
                 live_segments = session_data.get("segments", [])
                 legal_transcript = legal_formatter.format_petition_prose(
                     segments=live_segments,
-                    content_corrections=content_corrections,
                     remove_fillers=False,
                 )
                 print(f"✅ [BACKGROUND] Petition prose generated for: {session_id}")
@@ -149,16 +144,6 @@ class BackgroundProcessor:
 
             if user_sub:
                 try:
-                    # Phase 1, Step 6 — content corrections summary for metadata
-                    content_corrections = session_data.get("content_corrections", [])
-                    content_corrections_summary = {
-                        "total_proposed": sum(1 for c in content_corrections if c.get("kind") in ("scratch", "replace")),
-                        "total_accepted": sum(1 for c in content_corrections if c.get("kind") in ("scratch", "replace") and c.get("confirmed_by") not in (None, "") and not str(c.get("confirmed_by", "")).startswith("rejected_by:")),
-                        "total_auto_committed": sum(1 for c in content_corrections if c.get("confirmed_by") in ("auto_timeout", "ended_session_auto")),
-                        "total_rejected": sum(1 for c in content_corrections if c.get("kind") == "rejected"),
-                        "total_reversed": sum(1 for c in content_corrections if c.get("kind") == "reverse"),
-                    }
-
                     session_metadata = {
                         "session_id": session_id,
                         "start_time": session_data["start_time"].isoformat(),
@@ -172,9 +157,6 @@ class BackgroundProcessor:
                         "speaker_tags": speaker_tags,
                         "corrections_count": len(speaker_corrections),
                         "context": session_data.get("context"),
-                        # Phase 1, Step 6
-                        "content_corrections_summary": content_corrections_summary,
-                        "content_corrections_language_scope": "en-IN,en",
                     }
 
                     await self.s3_storage_service.upload_session_data(
@@ -186,7 +168,6 @@ class BackgroundProcessor:
                         legal_transcript=legal_transcript or "",
                         legal_transcript_json=legal_transcript_json,
                         session_metadata=session_metadata,
-                        content_corrections=content_corrections if content_corrections else None,
                     )
 
                     print(f"✅ [BACKGROUND] S3 upload completed for: {session_id}")

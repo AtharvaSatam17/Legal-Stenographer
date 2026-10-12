@@ -340,7 +340,6 @@ class S3StorageService:
         legal_transcript: str = "",
         legal_transcript_json: Optional[Dict[str, Any]] = None,
         session_metadata: Optional[Dict[str, Any]] = None,
-        content_corrections: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Upload all session data to S3 (Legal version)
@@ -354,7 +353,6 @@ class S3StorageService:
             legal_transcript: Formatted legal transcript
             legal_transcript_json: Structured legal transcript JSON
             session_metadata: Additional session metadata
-            content_corrections: Append-only list of content correction entries (Phase 1)
 
         Returns:
             Dict with upload results and S3 URLs
@@ -532,40 +530,6 @@ class S3StorageService:
                     print(f"❌ Error serializing session metadata: {e}")
                     upload_results["failed_files"]["metadata"] = str(e)
 
-            # 6. Upload corrections.json (Phase 1, Step 6)
-            if content_corrections:
-                corrections_s3_key = f"{folder_path}corrections.json"
-
-                try:
-                    # Build the corrections manifest
-                    corrections_manifest = {
-                        "session_id": session_id,
-                        "case_id": session_metadata.get("case_id") if session_metadata else None,
-                        "author_username": session_metadata.get("username") if session_metadata else user_sub,
-                        "generated_at": datetime.now().isoformat(),
-                        "content_corrections_language_scope": "en-IN,en",
-                        "corrections": content_corrections,
-                    }
-
-                    serialized_corrections = self.serialize_datetime_objects(corrections_manifest)
-                    corrections_json_str = json.dumps(serialized_corrections, indent=2, ensure_ascii=False)
-
-                    success = self._upload_text_to_s3(
-                        corrections_json_str,
-                        corrections_s3_key,
-                        "application/json; charset=utf-8"
-                    )
-
-                    if success:
-                        upload_results["uploaded_files"]["corrections"] = corrections_s3_key
-                        upload_results["s3_urls"]["corrections"] = f"s3://{self.bucket_name}/{corrections_s3_key}"
-                    else:
-                        upload_results["failed_files"]["corrections"] = "Upload failed"
-
-                except Exception as e:
-                    print(f"❌ Error serializing corrections JSON: {e}")
-                    upload_results["failed_files"]["corrections"] = str(e)
-            
         except Exception as e:
             print(f"❌ Unexpected error during session upload: {e}")
             upload_results["success"] = False

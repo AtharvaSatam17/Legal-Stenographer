@@ -123,75 +123,6 @@ class LegalTranscriptFormatter:
 
         return corrections_by_index
 
-    @staticmethod
-    def _resolve_content_corrections_by_time(
-        diarized_segments: List[Dict[str, Any]],
-        content_corrections: List[Dict[str, Any]],
-    ) -> Dict[int, Dict[str, Any]]:
-        """
-        Build a mapping of {diarized_segment_index: effective_edit} from the
-        content_corrections log.
-
-        Uses the same time-anchor matching as speaker corrections.
-        Replays the log to compute net-effective edits (accounting for reversals).
-
-        Returns:
-            Dict mapping segment index → {"kind": "scratch"|"replace", "replacement_text": ...}
-        """
-        if not content_corrections or not diarized_segments:
-            return {}
-
-        # Identify reversed correction IDs
-        reversed_ids: set = set()
-        for entry in content_corrections:
-            if entry.get("kind") == "reverse" and entry.get("reverses_correction_id"):
-                reversed_ids.add(entry["reverses_correction_id"])
-
-        # Collect effective corrections (not reversed, not rejected)
-        effective: List[Dict[str, Any]] = []
-        for entry in content_corrections:
-            kind = entry.get("kind")
-            if kind in ("rejected", "reverse"):
-                continue
-            if entry.get("correction_id") in reversed_ids:
-                continue
-            effective.append(entry)
-
-        # Match each effective correction to the nearest diarization segment
-        edits_by_index: Dict[int, Dict[str, Any]] = {}
-
-        for entry in effective:
-            anchor = entry.get("target_start_time_seconds")
-            if anchor is None:
-                continue
-
-            best_idx: Optional[int] = None
-            best_distance: float = float("inf")
-
-            for idx, seg in enumerate(diarized_segments):
-                seg_start = seg.get("start_time_seconds", 0.0)
-                seg_end = seg.get("end_time_seconds", 0.0)
-
-                if seg_start <= anchor <= seg_end:
-                    best_idx = idx
-                    best_distance = 0.0
-                    break
-
-                midpoint = (seg_start + seg_end) / 2.0
-                distance = abs(midpoint - anchor)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_idx = idx
-
-            if best_idx is not None and best_distance <= _TIME_MATCH_TOLERANCE_SECONDS:
-                # Later corrections override earlier ones for the same index
-                edits_by_index[best_idx] = {
-                    "kind": entry["kind"],
-                    "replacement_text": entry.get("replacement_text"),
-                }
-
-        return edits_by_index
-
     def format_timestamp(self, seconds: float) -> str:
         """Format seconds to [HH:MM:SS] format."""
         td = timedelta(seconds=int(seconds))
@@ -250,7 +181,6 @@ class LegalTranscriptFormatter:
         self,
         diarized_segments: List[Dict[str, Any]],
         speaker_corrections: Optional[Dict[str, Any]] = None,
-        content_corrections: Optional[List[Dict[str, Any]]] = None,
         remove_fillers: bool = False,
         include_duration: bool = False
     ) -> str:
@@ -260,13 +190,9 @@ class LegalTranscriptFormatter:
         Speaker precedence: manual correction (by time anchor) > diarization
         role mapping > heuristic guess.
 
-        Content corrections: applied via nearest-by-time matching. Lines with
-        applied corrections get a † marker.
-
         Args:
             diarized_segments: List of diarization segments
             speaker_corrections: Dict of speaker corrections
-            content_corrections: Append-only list of content correction entries (Phase 1)
             remove_fillers: Whether to remove filler words
             include_duration: Whether to include segment duration
 
@@ -281,11 +207,6 @@ class LegalTranscriptFormatter:
         # Phase 0, Step 0.3.3 — resolve speaker corrections by audio time
         corrections_by_index = self._resolve_corrections_by_time(
             diarized_segments, corrections
-        )
-
-        # Phase 1, Step 7 — resolve content corrections by audio time
-        content_edits_by_index = self._resolve_content_corrections_by_time(
-            diarized_segments, content_corrections or []
         )
 
         formatted_lines = []
@@ -307,26 +228,14 @@ class LegalTranscriptFormatter:
             else:
                 role = self.get_speaker_role(speaker_id)
 
-            # Apply content correction if present
-            content_edit = content_edits_by_index.get(idx)
-            if content_edit:
-                if content_edit["kind"] == "scratch":
-                    # Skip this line entirely (hidden by scratch)
-                    continue
-                elif content_edit["kind"] == "replace" and content_edit.get("replacement_text"):
-                    transcript = content_edit["replacement_text"]
-
             cleaned_text = self.clean_transcript_text(transcript, aggressive_cleaning=remove_fillers)
             timestamp = self.format_timestamp(start_time)
 
-            # † marker for lines that had a live content correction applied
-            marker = " †" if content_edit else ""
-
             if include_duration:
                 duration = end_time - start_time
-                line = f"{timestamp} {role} ({duration:.1f}s): {cleaned_text}{marker}"
+                line = f"{timestamp} {role} ({duration:.1f}s): {cleaned_text}"
             else:
-                line = f"{timestamp} {role}: {cleaned_text}{marker}"
+                line = f"{timestamp} {role}: {cleaned_text}"
 
             formatted_lines.append(line)
 
@@ -342,7 +251,6 @@ class LegalTranscriptFormatter:
         diarized_segments: List[Dict[str, Any]],
         metadata: Dict[str, Any] = None,
         speaker_corrections: Optional[Dict[str, Any]] = None,
-        content_corrections: Optional[List[Dict[str, Any]]] = None,
         remove_fillers: bool = False
     ) -> Dict[str, Any]:
         """
@@ -352,7 +260,6 @@ class LegalTranscriptFormatter:
             diarized_segments: List of diarization segments
             metadata: Optional metadata to include
             speaker_corrections: Dict of speaker corrections
-            content_corrections: Append-only list of content correction entries (Phase 1)
             remove_fillers: Whether to remove filler words
 
         Returns:
@@ -363,11 +270,6 @@ class LegalTranscriptFormatter:
         # Phase 0, Step 0.3.3 — resolve speaker corrections by audio time
         corrections_by_index = self._resolve_corrections_by_time(
             diarized_segments, corrections
-        )
-
-        # Phase 1, Step 7 — resolve content corrections by audio time
-        content_edits_by_index = self._resolve_content_corrections_by_time(
-            diarized_segments, content_corrections or []
         )
 
         formatted_segments = []
@@ -388,19 +290,6 @@ class LegalTranscriptFormatter:
                 role = self.get_speaker_role(speaker_id)
                 speaker_was_corrected = False
 
-            # Apply content correction
-            content_edit = content_edits_by_index.get(idx)
-            content_was_corrected = False
-            hidden = False
-
-            if content_edit:
-                if content_edit["kind"] == "scratch":
-                    hidden = True
-                    content_was_corrected = True
-                elif content_edit["kind"] == "replace" and content_edit.get("replacement_text"):
-                    transcript = content_edit["replacement_text"]
-                    content_was_corrected = True
-
             cleaned_text = self.clean_transcript_text(transcript, aggressive_cleaning=remove_fillers)
 
             formatted_segments.append({
@@ -413,25 +302,17 @@ class LegalTranscriptFormatter:
                 "duration_seconds": end_time - start_time,
                 "statement": cleaned_text,
                 "original_transcript": segment.get('transcript', ''),
-                "was_corrected": speaker_was_corrected or content_was_corrected,
-                "content_corrected": content_was_corrected,
-                "hidden": hidden,
+                "was_corrected": speaker_was_corrected,
             })
-
-        # Filter hidden segments from the visible output but keep them in data
-        visible_segments = [s for s in formatted_segments if not s.get("hidden")]
 
         result = {
             "transcript_type": "lawyer_client_consultation",
             "client_role": self.client_role,
             "metadata": metadata or {},
-            "segments": visible_segments,
-            "hidden_segments": [s for s in formatted_segments if s.get("hidden")],
+            "segments": formatted_segments,
             "total_segments": len(formatted_segments),
-            "visible_segments": len(visible_segments),
-            "speakers": list(set(seg["speaker_role"] for seg in visible_segments)),
+            "speakers": list(set(seg["speaker_role"] for seg in formatted_segments)),
             "speaker_corrections_applied": len(corrections_by_index),
-            "content_corrections_applied": len(content_edits_by_index),
         }
 
         return result
@@ -439,62 +320,58 @@ class LegalTranscriptFormatter:
     # ------------------------------------------------------------------
     # Petition prose formatting (lawyer-only, no timestamps / no speakers)
     #
-    # Produces a single continuous body of text from the live session
-    # segments. This path does NOT depend on diarization — it works from
-    # the segments captured during the live VAD stream. Content
-    # corrections (scratch / replace) are still applied by matching each
-    # correction's audio-time anchor to the nearest segment.
+    # Produces continuous body text from the live session segments. This
+    # path does NOT depend on diarization — it works from the segments
+    # captured during the live VAD stream. Segments flagged with
+    # "is_paragraph_break" (from the "new paragraph" voice command) start a
+    # new paragraph; paragraphs are separated by a blank line ("\n\n").
     # ------------------------------------------------------------------
     def format_petition_prose(
         self,
         segments: List[Dict[str, Any]],
-        content_corrections: Optional[List[Dict[str, Any]]] = None,
         remove_fillers: bool = False,
     ) -> str:
         """
-        Format live session segments into continuous petition prose.
+        Format live session segments into petition prose with paragraph breaks.
 
         Args:
-            segments: List of live segments, each with at least
-                      'transcript' and 'start_time_seconds'.
-            content_corrections: Append-only list of content correction entries.
+            segments: List of live segments. A content segment has a
+                      'transcript'; a paragraph-break marker has
+                      'is_paragraph_break': True and no text.
             remove_fillers: Whether to remove filler words.
 
         Returns:
-            A single continuous prose string (no timestamps, no speaker labels).
+            A prose string. Multiple paragraphs are separated by "\\n\\n"; a
+            session with no breaks returns a single paragraph.
         """
         if not segments:
             return ""
 
-        # Resolve content corrections (scratch/replace) by audio time anchor,
-        # reusing the same matching logic used for diarized output.
-        content_edits_by_index = self._resolve_content_corrections_by_time(
-            segments, content_corrections or []
-        )
+        paragraphs: List[str] = []
+        current: List[str] = []
 
-        pieces: List[str] = []
-
-        for idx, segment in enumerate(segments):
-            transcript = segment.get("transcript", "")
-
-            content_edit = content_edits_by_index.get(idx)
-            if content_edit:
-                if content_edit["kind"] == "scratch":
-                    # Scratched content is dropped from the petition entirely.
-                    continue
-                elif content_edit["kind"] == "replace" and content_edit.get("replacement_text"):
-                    transcript = content_edit["replacement_text"]
+        for segment in segments:
+            if segment.get("is_paragraph_break"):
+                # Flush the current paragraph and start a new one.
+                if current:
+                    paragraphs.append(" ".join(current))
+                    current = []
+                continue
 
             cleaned = self.clean_transcript_text(
-                transcript, aggressive_cleaning=remove_fillers
+                segment.get("transcript", ""), aggressive_cleaning=remove_fillers
             )
             if cleaned:
-                pieces.append(cleaned)
+                current.append(cleaned)
 
-        # Join into a single flowing paragraph of prose.
-        prose = " ".join(pieces)
-        prose = re.sub(r"\s+", " ", prose).strip()
-        return prose
+        if current:
+            paragraphs.append(" ".join(current))
+
+        # Normalize whitespace within each paragraph, drop empties, and join
+        # paragraphs with a blank line.
+        paragraphs = [re.sub(r"\s+", " ", p).strip() for p in paragraphs]
+        paragraphs = [p for p in paragraphs if p]
+        return "\n\n".join(paragraphs)
 
     def update_role_mapping(self, speaker_id: str, role: str):
         """Update the role mapping for a specific speaker."""

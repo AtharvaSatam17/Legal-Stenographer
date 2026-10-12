@@ -128,9 +128,72 @@ def test_correction_out_of_tolerance_not_applied():
     print("✅ test_correction_out_of_tolerance_not_applied PASSED")
 
 
+def test_petition_prose_single_paragraph():
+    """Content-only segments (no break markers) produce a single paragraph."""
+    formatter = LegalTranscriptFormatter(client_role="PLAINTIFF")
+    segments = [
+        {"segment_id": "s1", "transcript": "The plaintiff entered into a contract.",
+         "start_time_seconds": 0.0, "end_time_seconds": 4.0},
+        {"segment_id": "s2", "transcript": "The defendant breached that contract.",
+         "start_time_seconds": 4.0, "end_time_seconds": 8.0},
+    ]
+
+    prose = formatter.format_petition_prose(segments)
+
+    assert "\n\n" not in prose, f"Expected a single paragraph, got: {prose!r}"
+    assert "contract" in prose
+    print("✅ test_petition_prose_single_paragraph PASSED")
+
+
+def test_petition_prose_paragraph_break():
+    """A break marker between content yields two paragraphs separated by \\n\\n."""
+    formatter = LegalTranscriptFormatter(client_role="PLAINTIFF")
+    segments = [
+        {"segment_id": "s1", "transcript": "The plaintiff entered into a contract.",
+         "start_time_seconds": 0.0, "end_time_seconds": 4.0},
+        {"segment_id": "brk", "is_paragraph_break": True, "transcript": "",
+         "start_time_seconds": 4.0, "end_time_seconds": 4.0},
+        {"segment_id": "s2", "transcript": "The defendant breached that contract.",
+         "start_time_seconds": 4.0, "end_time_seconds": 8.0},
+    ]
+
+    prose = formatter.format_petition_prose(segments)
+    paragraphs = prose.split("\n\n")
+
+    assert len(paragraphs) == 2, f"Expected 2 paragraphs, got {len(paragraphs)}: {prose!r}"
+    assert "entered into a contract" in paragraphs[0]
+    assert "breached that contract" in paragraphs[1]
+    print("✅ test_petition_prose_paragraph_break PASSED")
+
+
+def test_petition_prose_ignores_leading_and_empty_breaks():
+    """Leading/trailing/consecutive break markers do not create empty paragraphs."""
+    formatter = LegalTranscriptFormatter(client_role="PLAINTIFF")
+    segments = [
+        {"is_paragraph_break": True, "transcript": ""},
+        {"segment_id": "s1", "transcript": "First statement.",
+         "start_time_seconds": 0.0, "end_time_seconds": 4.0},
+        {"is_paragraph_break": True, "transcript": ""},
+        {"is_paragraph_break": True, "transcript": ""},
+        {"segment_id": "s2", "transcript": "Second statement.",
+         "start_time_seconds": 4.0, "end_time_seconds": 8.0},
+        {"is_paragraph_break": True, "transcript": ""},
+    ]
+
+    prose = formatter.format_petition_prose(segments)
+    paragraphs = prose.split("\n\n")
+
+    assert len(paragraphs) == 2, f"Expected 2 non-empty paragraphs, got {len(paragraphs)}: {prose!r}"
+    assert all(p.strip() for p in paragraphs)
+    print("✅ test_petition_prose_ignores_leading_and_empty_breaks PASSED")
+
+
 if __name__ == "__main__":
     test_new_format_correction_anchors_by_time()
     test_new_format_correction_json()
     test_legacy_format_no_crash()
     test_correction_out_of_tolerance_not_applied()
-    print("\n🎉 All Phase 0 formatter tests passed!")
+    test_petition_prose_single_paragraph()
+    test_petition_prose_paragraph_break()
+    test_petition_prose_ignores_leading_and_empty_breaks()
+    print("\n🎉 All formatter tests passed!")

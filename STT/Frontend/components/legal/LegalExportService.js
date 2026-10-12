@@ -3,19 +3,32 @@ import { jsPDF } from 'jspdf';
 
 export default function LegalExportService({ transcript, messages, caseMetadata, sessionId }) {
   
-  // Build a single continuous prose body from the segments (no timestamps,
-  // no speaker labels). Falls back to the raw transcript string if there are
-  // no structured messages.
+  // Build petition prose from the segments (no timestamps, no speaker labels),
+  // grouping into paragraphs split at each paragraph-break marker. Paragraphs
+  // are separated by a blank line ("\n\n"). Falls back to the raw transcript
+  // string if there are no structured messages.
   const buildProse = () => {
     if (messages && messages.length > 0) {
-      return messages
-        .map((msg) => (msg.text || '').trim())
+      const paragraphs = [];
+      let current = [];
+      for (const msg of messages) {
+        if (msg.isParagraphBreak) {
+          if (current.length > 0) {
+            paragraphs.push(current.join(' '));
+            current = [];
+          }
+          continue;
+        }
+        const text = (msg.text || '').trim();
+        if (text) current.push(text);
+      }
+      if (current.length > 0) paragraphs.push(current.join(' '));
+      return paragraphs
+        .map((p) => p.replace(/\s+/g, ' ').trim())
         .filter(Boolean)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+        .join('\n\n');
     }
-    return (transcript || '').replace(/\s+/g, ' ').trim();
+    return (transcript || '').replace(/[^\S\n]+/g, ' ').trim();
   };
   
   // Export as TXT

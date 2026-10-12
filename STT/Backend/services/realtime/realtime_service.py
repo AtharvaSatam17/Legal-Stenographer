@@ -1,7 +1,6 @@
 # services/realtime_service.py (Legal Stenographer Version)
 import asyncio
 import json
-import uuid
 import logging
 from datetime import datetime
 from typing import Dict, List, Any
@@ -9,7 +8,6 @@ from fastapi import WebSocket
 
 from services.realtime.audio_stream_handler import AudioStreamHandler
 from services.realtime.background_processor import BackgroundProcessor
-from services.realtime.content_correction_handler import ContentCorrectionHandler
 from core.session_manager import SessionManager
 
 from services.sarvam_service import SarvamService
@@ -41,16 +39,10 @@ class RealTimeTranscriptionService:
         self.s3_storage_service = S3StorageService()
         self.session_manager = SessionManager()
 
-        # Content correction handler (Phase 1, Step 3)
-        self.content_correction_handler = ContentCorrectionHandler(
-            session_manager=self.session_manager
-        )
-
-        # Audio handler — inject the content_correction_handler
+        # Audio handler
         self.audio_handler = AudioStreamHandler(
             session_manager=self.session_manager,
             vad_service=self.vad_service,
-            content_correction_handler=self.content_correction_handler,
         )
 
         # Background processor (handles diarization and legal formatting)
@@ -164,69 +156,7 @@ class RealTimeTranscriptionService:
                 await self.tag_speaker(websocket, data)
             elif message_type == 'correct_speaker':
                 await self.correct_speaker(websocket, data)
-            # Phase 1, Step 3 — content correction lifecycle messages
-            elif message_type == 'content_correction_accept':
-                await self.content_correction_handler.accept(
-                    session_id=data.get('session_id'),
-                    correction_id=data.get('correction_id'),
-                    staff_username=data.get('staff_username', 'staff'),
-                )
-            elif message_type == 'content_correction_reject':
-                await self.content_correction_handler.reject(
-                    session_id=data.get('session_id'),
-                    correction_id=data.get('correction_id'),
-                    staff_username=data.get('staff_username', 'staff'),
-                )
-            elif message_type == 'content_correction_reverse':
-                await self.content_correction_handler.reverse(
-                    session_id=data.get('session_id'),
-                    correction_id=data.get('correction_id'),
-                    staff_username=data.get('staff_username', 'staff'),
-                )
-            elif message_type == 'content_correction_push':
-                # Push-to-command: staff triggers a correction via keyboard shortcut
-                push_command = {
-                    "kind": data.get("kind", "scratch"),
-                }
-                if push_command["kind"] == "replace":
-                    push_command["replacement"] = data.get("replacement", "")
-
-                push_segment_data = {
-                    "segment_id": f"push_{uuid.uuid4().hex[:8]}",
-                    "transcript": f"[staff push: {push_command['kind']}]",
-                    "speaker_heuristic": "STAFF",
-                    "speaker_confidence": 1.0,
-                    "timestamp": datetime.now().isoformat(),
-                    "language": "en-IN",
-                    "start_time_seconds": None,
-                    "end_time_seconds": None,
-                }
-                push_session_id = data.get('session_id')
-                staff_user = data.get('staff_username', 'staff')
-
-                if push_command["kind"] == "scratch":
-                    # Scratch: propose and immediately accept (no pending window)
-                    await self.content_correction_handler.propose(
-                        session_id=push_session_id,
-                        command=push_command,
-                        command_segment_data=push_segment_data,
-                    )
-                    session = self.session_manager.get_session(push_session_id)
-                    if session:
-                        pending_ids = list(session.get("pending_content_corrections", {}).keys())
-                        if pending_ids:
-                            latest_cid = pending_ids[-1]
-                            await self.content_correction_handler.accept(
-                                push_session_id, latest_cid, f"auto_pushed:{staff_user}"
-                            )
-                else:
-                    # Replace: go through normal pending window
-                    await self.content_correction_handler.propose(
-                        session_id=push_session_id,
-                        command=push_command,
-                        command_segment_data=push_segment_data,
-                    )
-            # Phase 1, Step 10 — session resync on reconnect
+            # Session resync on reconnect
             elif message_type == 'session_resync':
                 await self._handle_session_resync(websocket, data)
             else:
@@ -437,12 +367,7 @@ class RealTimeTranscriptionService:
             await websocket.send_text(json.dumps(immediate_response))
             logger.info(f"Session ended response sent to frontend")
 
-            # Step 7: Force-commit any pending content corrections
-            if session.get("pending_content_corrections"):
-                logger.info(f"Force-committing {len(session['pending_content_corrections'])} pending corrections")
-                await self.content_correction_handler.force_commit_all_pending(session_id)
-
-            # Step 8: Create session data copy for background processing
+            # Step 7: Create session data copy for background processing
             session_data_copy = {
                 'session_id': session_id,
                 'user_sub': user_sub,
@@ -462,14 +387,13 @@ class RealTimeTranscriptionService:
                 'speaker_tags': session.get('speaker_tags', {}),
                 'speaker_corrections': session.get('speaker_corrections', {}),
                 'segments': session.get('segments', []),
-                'content_corrections': session.get('content_corrections', []),
             }
             
-            # Step 9: Remove session from active sessions
+            # Step 8: Remove session from active sessions
             self.session_manager.delete_session(session_id)
             logger.info(f"Session removed from active sessions: {session_id}")
             
-            # Step 10: Launch background processing task
+            # Step 9: Launch background processing task
             asyncio.create_task(
                 self.background_processor.process(session_data_copy)
             )
@@ -507,8 +431,6 @@ class RealTimeTranscriptionService:
             'type': 'session_state',
             'session_id': session_id,
             'segments': session.get('segments', []),
-            'content_corrections': session.get('content_corrections', []),
-            'pending_content_corrections': session.get('pending_content_corrections', {}),
             'transcript_buffer': session.get('transcript_buffer', ''),
             'session_active': not session.get('ending', False),
         }

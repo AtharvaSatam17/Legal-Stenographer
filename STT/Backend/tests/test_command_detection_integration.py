@@ -1,6 +1,8 @@
 """
-Phase 1 Step 2 — Integration test verifying that command segments are NOT
-broadcast as transcription_update and NOT appended to session["segments"].
+Integration test verifying that the "new paragraph" command segment is NOT
+broadcast as transcription_update and NOT appended as content to
+session["segments"] — instead it records a paragraph-break marker and emits a
+paragraph_break message.
 """
 
 import sys
@@ -10,8 +12,7 @@ import pytest
 import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from unittest.mock import MagicMock, AsyncMock, patch
-from datetime import datetime
+from unittest.mock import MagicMock, AsyncMock
 from core.session_manager import SessionManager
 from services.realtime.audio_stream_handler import AudioStreamHandler
 
@@ -45,56 +46,46 @@ async def run_test():
     assert len(session["segments"]) == 1, f"Expected 1 segment, got {len(session['segments'])}"
     assert session["segments"][0]["transcript"] == "Good afternoon, I have reviewed the documents."
 
-    # Check that transcription_update was sent
     calls = ws.send_text.call_args_list
     last_msg = json.loads(calls[-1][0][0])
     assert last_msg["type"] == "transcription_update", f"Expected transcription_update, got {last_msg['type']}"
 
     ws.send_text.reset_mock()
 
-    # --- Test 2: "scratch that" command is NOT appended and NOT broadcast as transcription_update ---
-    event_data_cmd = make_mock_event_data("scratch that", audio_duration=5.0)
-    await handler._handle_transcript(session_id, "scratch that", event_data_cmd)
+    # --- Test 2: "new paragraph" command does NOT append content and does NOT broadcast transcription_update ---
+    event_data_cmd = make_mock_event_data("new paragraph", audio_duration=5.0)
+    await handler._handle_transcript(session_id, "new paragraph", event_data_cmd)
 
-    assert len(session["segments"]) == 1, f"Expected still 1 segment (command not appended), got {len(session['segments'])}"
+    # A break marker is appended, but it is NOT a content segment.
+    assert len(session["segments"]) == 2, f"Expected 2 segments (one marker added), got {len(session['segments'])}"
+    marker = session["segments"][1]
+    assert marker.get("is_paragraph_break") is True, "Second segment should be a paragraph-break marker"
+    assert marker.get("transcript") == "", "Break marker must carry no transcript text"
 
-    # Should have sent a correction_failed (handler not wired yet placeholder)
+    # The last message should be paragraph_break, NOT transcription_update.
     calls = ws.send_text.call_args_list
     last_msg = json.loads(calls[-1][0][0])
-    assert last_msg["type"] == "correction_failed", f"Expected correction_failed, got {last_msg['type']}"
-    assert last_msg["command"]["kind"] == "scratch"
-    assert last_msg["reason"] == "handler_not_wired"
+    assert last_msg["type"] == "paragraph_break", f"Expected paragraph_break, got {last_msg['type']}"
+    assert last_msg["session_id"] == session_id
+
+    # No transcription_update should have been emitted for the command.
+    assert not any(json.loads(c[0][0]).get("type") == "transcription_update" for c in calls), \
+        "Command must not broadcast a transcription_update"
 
     ws.send_text.reset_mock()
 
-    # --- Test 3: "change that to X" command behaves the same way ---
-    event_data_cmd2 = make_mock_event_data("change that to the defendant was present at 4 PM", audio_duration=8.0)
-    await handler._handle_transcript(session_id, "change that to the defendant was present at 4 PM", event_data_cmd2)
-
-    assert len(session["segments"]) == 1, f"Expected still 1 segment, got {len(session['segments'])}"
-
-    calls = ws.send_text.call_args_list
-    last_msg = json.loads(calls[-1][0][0])
-    assert last_msg["type"] == "correction_failed"
-    assert last_msg["command"]["kind"] == "replace"
-    assert last_msg["command"]["replacement"] == "the defendant was present at 4 PM"
-
-    ws.send_text.reset_mock()
-
-    # --- Test 4: Normal content after a command is still appended correctly ---
+    # --- Test 3: Normal content after a break is still appended and broadcast ---
     event_data_content2 = make_mock_event_data("The next step would be to file a complaint.", audio_duration=12.0)
     await handler._handle_transcript(session_id, "The next step would be to file a complaint.", event_data_content2)
 
-    assert len(session["segments"]) == 2, f"Expected 2 segments now, got {len(session['segments'])}"
-    assert session["segments"][1]["transcript"] == "The next step would be to file a complaint."
-    # start_time_seconds should chain from the first segment's end
-    assert session["segments"][1]["start_time_seconds"] == 3.0  # first segment ended at 3.0
+    assert len(session["segments"]) == 3, f"Expected 3 segments now, got {len(session['segments'])}"
+    assert session["segments"][2]["transcript"] == "The next step would be to file a complaint."
 
     calls = ws.send_text.call_args_list
     last_msg = json.loads(calls[-1][0][0])
     assert last_msg["type"] == "transcription_update"
 
-    print("✅ All command detection integration tests passed!")
+    print("✅ All paragraph-break integration tests passed!")
 
 
 if __name__ == "__main__":
