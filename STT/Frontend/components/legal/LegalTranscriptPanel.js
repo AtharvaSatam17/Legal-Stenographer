@@ -8,22 +8,8 @@ export default function LegalTranscriptPanel({
   onToggleEdit,
   onSave,
 }) {
-  const [editedTranscript, setEditedTranscript] = useState(transcript);
+  const [editedText, setEditedText] = useState('');
   const messagesEndRef = useRef(null);
-
-  useEffect(() => {
-    setEditedTranscript(transcript);
-  }, [transcript]);
-  
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-  
-  const handleSave = () => {
-    onSave(editedTranscript);
-    onToggleEdit();
-  };
 
   // Group messages into paragraphs, splitting at each paragraph-break marker.
   // Each paragraph is an array of segment text strings.
@@ -42,6 +28,40 @@ export default function LegalTranscriptPanel({
     }
     if (current.length > 0) paragraphs.push(current);
     return paragraphs;
+  };
+
+  // Build the numbered, editable text form: "1. <para>\n\n2. <para>" ...
+  const buildEditableText = () =>
+    buildParagraphs()
+      .map((p) => p.join(' ').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .map((p, i) => `${i + 1}. ${p}`)
+      .join('\n\n');
+
+  // When entering edit mode, seed the textarea from the current paragraphs.
+  useEffect(() => {
+    if (isEditing) setEditedText(buildEditableText());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing]);
+
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Parse the edited text back into an ordered array of paragraph strings.
+  // Paragraphs are separated by blank lines; any leading "N." numbering the
+  // user left in place is stripped (numbering is always re-derived on render).
+  const parseEditedParagraphs = (text) =>
+    text
+      .split(/\n\s*\n+/)
+      .map((block) => block.replace(/\s+/g, ' ').trim())
+      .map((block) => block.replace(/^\d+\.\s*/, '').trim())
+      .filter(Boolean);
+
+  const handleSave = () => {
+    onSave(parseEditedParagraphs(editedText));
+    onToggleEdit();
   };
 
   // Number of actual content segments (break markers excluded).
@@ -73,13 +93,14 @@ export default function LegalTranscriptPanel({
         {isEditing ? (
           <div>
             <textarea
-              value={editedTranscript}
-              onChange={(e) => setEditedTranscript(e.target.value)}
+              value={editedText}
+              onChange={(e) => setEditedText(e.target.value)}
               className="w-full h-96 p-4 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               placeholder="Edit transcript here..."
             />
             <p className="text-sm text-gray-500 mt-2">
-              Make manual corrections to the transcript. Click &ldquo;Save Changes&rdquo; when done.
+              Each numbered block is one paragraph. Separate paragraphs with a blank line to split them,
+              or remove the blank line to merge. Numbering is applied automatically on save.
             </p>
           </div>
         ) : (
@@ -93,6 +114,7 @@ export default function LegalTranscriptPanel({
               <div className="text-gray-800 leading-loose text-justify text-[15px]">
                 {buildParagraphs().map((paragraph, idx) => (
                   <p key={idx} className="mb-4 last:mb-0">
+                    <span className="font-semibold text-gray-900 mr-1">{idx + 1}.</span>
                     {paragraph.join(' ')}
                   </p>
                 ))}

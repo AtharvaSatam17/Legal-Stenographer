@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Dict, List, Any
 from fastapi import WebSocket
@@ -97,8 +98,20 @@ class RealTimeTranscriptionService:
             logger.exception(f"Session cleanup error: {e}")
 
     async def update_session_transcript(self, websocket: WebSocket, data: Dict):
-        """Update session transcript buffer with edited content"""
+        """
+        Update session transcript with edited content.
+
+        Preferred form (Option A): data["paragraphs"] is an ordered list of
+        paragraph strings. We rebuild session["segments"] into the equivalent
+        content + paragraph-break-marker form so the final petition prose
+        (built from segments) matches the edit. Numbering is derived at
+        format time, never stored.
+
+        Legacy form: data["transcript"] is a plain string; we just overwrite
+        the transcript buffer.
+        """
         session_id = data.get('session_id')
+        paragraphs = data.get('paragraphs')
         updated_transcript = data.get('transcript')
 
         logger.debug(f"UPDATE_TRANSCRIPT REQUEST: Session={session_id}")
@@ -113,13 +126,63 @@ class RealTimeTranscriptionService:
 
         session = self.session_manager.get_session(session_id)
 
-        if updated_transcript is not None:
+        if isinstance(paragraphs, list):
+            # Normalize + drop empties
+            clean_paras = []
+            for p in paragraphs:
+                if not isinstance(p, str):
+                    continue
+                p = " ".join(p.split()).strip()
+                if p:
+                    clean_paras.append(p)
+
+            # Rebuild segments: one content segment per paragraph, with a
+            # paragraph-break marker between consecutive paragraphs.
+            rebuilt_segments = []
+            for i, text in enumerate(clean_paras):
+                if i > 0:
+                    rebuilt_segments.append({
+                        "segment_id": f"edit_break_{i}_{uuid.uuid4().hex[:6]}",
+                        "is_paragraph_break": True,
+                        "transcript": "",
+                        "timestamp": datetime.now().isoformat(),
+                        "start_time_seconds": None,
+                        "end_time_seconds": None,
+                    })
+                rebuilt_segments.append({
+                    "segment_id": f"edit_seg_{i}_{uuid.uuid4().hex[:6]}",
+                    "transcript": text,
+                    "speaker_heuristic": None,
+                    "speaker_confidence": 0,
+                    "timestamp": datetime.now().isoformat(),
+                    "language": session.get("detected_language"),
+                    "original_language": session.get("detected_language"),
+                    "start_time_seconds": None,
+                    "end_time_seconds": None,
+                })
+
+            session["segments"] = rebuilt_segments
+            joined = " ".join(clean_paras).strip()
+            session["transcript_buffer"] = joined
+            session["raw_transcript_buffer"] = joined
+
+            logger.info(f"Transcript updated from {len(clean_paras)} paragraph(s), {len(rebuilt_segments)} segments")
+
+            await websocket.send_text(json.dumps({
+                'type': 'transcript_updated',
+                'session_id': session_id,
+                'message': 'Transcript updated successfully',
+                'paragraphs': len(clean_paras),
+                'transcript_length': len(joined),
+            }))
+        elif updated_transcript is not None:
+            # Legacy plain-string path
             old_length = len(session.get('transcript_buffer', ''))
             session['transcript_buffer'] = updated_transcript.strip()
             new_length = len(session["transcript_buffer"])
-            
-            logger.info(f"Transcript updated: {old_length} -> {new_length} chars")
-            
+
+            logger.info(f"Transcript updated (legacy string): {old_length} -> {new_length} chars")
+
             await websocket.send_text(json.dumps({
                 'type': 'transcript_updated',
                 'session_id': session_id,

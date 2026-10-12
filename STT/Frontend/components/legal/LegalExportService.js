@@ -26,6 +26,7 @@ export default function LegalExportService({ transcript, messages, caseMetadata,
       return paragraphs
         .map((p) => p.replace(/\s+/g, ' ').trim())
         .filter(Boolean)
+        .map((p, i) => `${i + 1}. ${p}`)
         .join('\n\n');
     }
     return (transcript || '').replace(/[^\S\n]+/g, ' ').trim();
@@ -149,44 +150,41 @@ export default function LegalExportService({ transcript, messages, caseMetadata,
   const hasContent = transcript && transcript.trim().length > 0;
   
   return (
-    <div className="bg-white rounded-lg shadow p-6">
-      <h3 className="text-lg font-bold mb-4 flex items-center">
-        <Download className="w-5 h-5 mr-2" />
-        Export Transcript
-      </h3>
-      
-      <div className="space-y-3">
-        {/* Export as TXT */}
-        <button
-          onClick={exportAsTXT}
-          disabled={!hasContent}
-          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-4 py-3 rounded-lg font-medium flex items-center justify-center space-x-2 transition-colors"
-        >
-          <FileText className="w-5 h-5" />
-          <span>Export as TXT</span>
-        </button>
-        
-        {/* Export as PDF */}
-        <button
-          onClick={exportAsPDF}
-          disabled={!hasContent}
-          className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-4 py-3 rounded-lg font-medium flex items-center justify-center space-x-2 transition-colors"
-        >
-          <FileText className="w-5 h-5" />
-          <span>Export as PDF</span>
-        </button>
-      </div>
-      
-      {!hasContent && (
-        <p className="text-sm text-gray-500 mt-4 text-center">
-          No transcript available to export
-        </p>
-      )}
-      
-      <div className="mt-4 p-3 bg-blue-50 rounded-lg">
-        <p className="text-xs text-blue-800">
-          <strong>Note:</strong> Exports the petition as continuous prose along with case metadata.
-        </p>
+    <div className="bg-white rounded-lg shadow p-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        {/* Title + note */}
+        <div className="flex items-center gap-2">
+          <Download className="w-5 h-5 text-gray-700" />
+          <div>
+            <h3 className="text-base font-bold leading-tight">Export Transcript</h3>
+            <p className="text-xs text-gray-500">
+              {hasContent
+                ? 'Exports the petition as continuous prose along with case metadata.'
+                : 'No transcript available to export yet.'}
+            </p>
+          </div>
+        </div>
+
+        {/* Action buttons — inline, right-aligned on wider screens */}
+        <div className="flex gap-3">
+          <button
+            onClick={exportAsTXT}
+            disabled={!hasContent}
+            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
+          >
+            <FileText className="w-4 h-4" />
+            <span>Export as TXT</span>
+          </button>
+
+          <button
+            onClick={exportAsPDF}
+            disabled={!hasContent}
+            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
+          >
+            <FileText className="w-4 h-4" />
+            <span>Export as PDF</span>
+          </button>
+        </div>
       </div>
     </div>
   );

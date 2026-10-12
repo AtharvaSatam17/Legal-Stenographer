@@ -312,10 +312,36 @@ export default function LegalTranscriptionSystem({ user }) {
     setIsRecording(false); setAudioPaused(false); isRecordingRef.current = false; audioPausedRef.current = false; setIsEndingSession(false);
   };
   
-  const saveTranscript = (editedTranscript) => {
-    setTranscript(editedTranscript);
+  // Receives an ordered array of paragraph strings from the edit panel.
+  // Rebuilds the local messages array (one content segment per paragraph,
+  // with break markers between them) so the paragraph display and export
+  // reflect the edit immediately, and sends the structured paragraphs to the
+  // backend so the final petition prose matches.
+  const saveTranscript = (paragraphs) => {
+    const paras = Array.isArray(paragraphs) ? paragraphs : [];
+
+    // Rebuild messages: content segment, then a break marker before each
+    // subsequent paragraph.
+    const rebuilt = [];
+    paras.forEach((text, i) => {
+      if (i > 0) rebuilt.push({ segment_id: `edit_break_${i}`, isParagraphBreak: true });
+      rebuilt.push({
+        segment_id: `edit_seg_${i}`,
+        text,
+        timestamp: new Date().toISOString(),
+        speaker: null,
+        speakerConfidence: 0,
+      });
+    });
+    setMessages(rebuilt);
+    setTranscript(paras.join(' ').replace(/\s+/g, ' ').trim());
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && sessionId) {
-      wsRef.current.send(JSON.stringify({ type: 'update_transcript', session_id: sessionId, transcript: editedTranscript }));
+      wsRef.current.send(JSON.stringify({
+        type: 'update_transcript',
+        session_id: sessionId,
+        paragraphs: paras,
+      }));
     }
   };
   
@@ -344,21 +370,16 @@ export default function LegalTranscriptionSystem({ user }) {
           onPauseAudio={pauseAudioRecording} onResumeAudio={resumeAudioRecording} disabled={isEndingSession}
         />
         
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
-            <LegalTranscriptPanel
-              messages={messages}
-              transcript={transcript}
-              isEditing={isEditingTranscript}
-              onToggleEdit={() => setIsEditingTranscript(!isEditingTranscript)}
-              onSave={saveTranscript}
-            />
-          </div>
-          
-          <div className="space-y-6">
-            <LegalExportService transcript={transcript} messages={messages} caseMetadata={caseMetadata} sessionId={sessionId} />
-          </div>
-        </div>
+        {/* Export toolbar — placed up top alongside the controls, not in a sidebar */}
+        <LegalExportService transcript={transcript} messages={messages} caseMetadata={caseMetadata} sessionId={sessionId} />
+
+        <LegalTranscriptPanel
+          messages={messages}
+          transcript={transcript}
+          isEditing={isEditingTranscript}
+          onToggleEdit={() => setIsEditingTranscript(!isEditingTranscript)}
+          onSave={saveTranscript}
+        />
         
         {/* Debug Info (Development Only) */}
         {process.env.NODE_ENV === 'development' && (

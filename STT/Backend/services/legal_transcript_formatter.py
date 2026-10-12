@@ -367,11 +367,12 @@ class LegalTranscriptFormatter:
         if current:
             paragraphs.append(" ".join(current))
 
-        # Normalize whitespace within each paragraph, drop empties, and join
-        # paragraphs with a blank line.
+        # Normalize whitespace within each paragraph, drop empties, number
+        # each paragraph (1., 2., ...), and join with a blank line.
         paragraphs = [re.sub(r"\s+", " ", p).strip() for p in paragraphs]
         paragraphs = [p for p in paragraphs if p]
-        return "\n\n".join(paragraphs)
+        numbered = [f"{i}. {p}" for i, p in enumerate(paragraphs, start=1)]
+        return "\n\n".join(numbered)
 
     def update_role_mapping(self, speaker_id: str, role: str):
         """Update the role mapping for a specific speaker."""
