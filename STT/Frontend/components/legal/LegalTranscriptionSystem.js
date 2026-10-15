@@ -34,10 +34,6 @@ export default function LegalTranscriptionSystem({ user }) {
   // AI draft: handler registered by the transcript panel so it can receive
   // ai_draft_result / ai_draft_error routed from the websocket.
   const aiDraftHandlerRef = useRef(null);
-
-  // When true, the next incoming transcript segment starts a new paragraph
-  // (set when leaving edit mode so post-edit speech is cleanly separated).
-  const pendingParagraphBreakRef = useRef(false);
   
   // Transcript state
   const [transcript, setTranscript] = useState('');
@@ -85,13 +81,12 @@ export default function LegalTranscriptionSystem({ user }) {
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      console.log('[DEBUG][WS] ✅ WebSocket OPEN');
+      console.log('✅ WebSocket connected');
       setConnectionStatus('connected');
       reconnectAttemptRef.current = 0;
 
       // Step 10: if we had an active session, request resync
       if (sessionIdRef.current && sessionActiveRef.current) {
-        console.log('[DEBUG][WS] requesting session_resync for', sessionIdRef.current);
         ws.send(JSON.stringify({
           type: 'session_resync',
           session_id: sessionIdRef.current,
@@ -102,22 +97,19 @@ export default function LegalTranscriptionSystem({ user }) {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type !== 'audio_stream') {
-          console.log('[DEBUG][WS] ⬇️ message in:', data.type);
-        }
         handleWebSocketMessage(data);
       } catch (error) {
-        console.error('[DEBUG][WS] ❌ Error parsing message:', error);
+        console.error('❌ Error parsing WebSocket message:', error);
       }
     };
     
     ws.onerror = (error) => {
-      console.error('[DEBUG][WS] ❌ WebSocket ERROR event:', error);
+      console.error('❌ WebSocket error:', error);
       setConnectionStatus('error');
     };
     
-    ws.onclose = (ev) => {
-      console.log(`[DEBUG][WS] 🔌 WebSocket CLOSED (code=${ev?.code}, reason='${ev?.reason}', wasClean=${ev?.wasClean})`);
+    ws.onclose = () => {
+      console.log('🔌 WebSocket closed');
       setConnectionStatus('disconnected');
 
       // Step 10: reconnect with backoff if session is active
@@ -148,33 +140,20 @@ export default function LegalTranscriptionSystem({ user }) {
         setSessionActive(true);
         break;
         
-      case 'transcription_update': {
-        console.log(`[DEBUG][FE] 📝 transcription_update: seg=${data.segment_id} text='${(data.transcript || '').substring(0, 60)}'`);
+      case 'transcription_update':
+        console.log('📝 Transcript update:', data.transcript?.substring(0, 50));
         setTranscript(prev => {
           const newTranscript = prev + ' ' + data.transcript;
           return newTranscript.trim();
         });
-        // If we just left edit mode, start this segment on a new paragraph.
-        const startNewPara = pendingParagraphBreakRef.current;
-        pendingParagraphBreakRef.current = false;
-        setMessages(prev => {
-          const seg = {
-            segment_id: data.segment_id,
-            text: data.transcript,
-            timestamp: data.timestamp || new Date().toISOString(),
-            speaker: data.speaker || null,
-            speakerConfidence: data.speaker_confidence || 0
-          };
-          // Only insert a break if there's existing content to separate from.
-          const needsBreak = startNewPara && prev.some(m => !m.isParagraphBreak);
-          const nextMsgs = needsBreak
-            ? [...prev, { segment_id: `post_edit_break_${Date.now()}`, isParagraphBreak: true }, seg]
-            : [...prev, seg];
-          console.log(`[DEBUG][FE] messages: ${prev.length} -> ${nextMsgs.length} (newPara=${needsBreak})`);
-          return nextMsgs;
-        });
+        setMessages(prev => [...prev, {
+          segment_id: data.segment_id,
+          text: data.transcript,
+          timestamp: data.timestamp || new Date().toISOString(),
+          speaker: data.speaker || null,
+          speakerConfidence: data.speaker_confidence || 0
+        }]);
         break;
-      }
         
       case 'speaker_tagged':
         console.log('🏷️ Speaker tagged:', data.speaker_id, '→', data.role);
@@ -233,10 +212,6 @@ export default function LegalTranscriptionSystem({ user }) {
         alert('Session could not be recovered after reconnect. Please start a new session.');
         break;
         
-      case 'transcript_updated':
-        console.log(`[DEBUG][FE] ✅ backend ack transcript_updated: paragraphs=${data.paragraphs}, len=${data.transcript_length}`);
-        break;
-
       // AI paragraph drafting (Bedrock / Nova Pro) results
       case 'ai_draft_result':
         aiDraftHandlerRef.current?.({ request_id: data.request_id, draft: data.draft });
@@ -285,26 +260,8 @@ export default function LegalTranscriptionSystem({ user }) {
     ));
   };
   
-  const pauseAudioRecording = () => {
-    setAudioPaused(true);
-    audioPausedRef.current = true;
-    // Suspend the audio context so the browser doesn't keep an idle graph
-    // running; also makes resume deterministic.
-    try { audioContextRef.current?.suspend?.(); } catch (e) { /* no-op */ }
-  };
-  const resumeAudioRecording = async () => {
-    setAudioPaused(false);
-    audioPausedRef.current = false;
-    // Browsers auto-suspend idle AudioContexts; explicitly resume so
-    // onaudioprocess starts firing again after an edit / AI drafting pause.
-    try {
-      if (audioContextRef.current && audioContextRef.current.state !== 'running') {
-        await audioContextRef.current.resume();
-      }
-    } catch (e) {
-      console.error('❌ Error resuming audio context:', e);
-    }
-  };
+  const pauseAudioRecording = () => { setAudioPaused(true); audioPausedRef.current = true; };
+  const resumeAudioRecording = () => { setAudioPaused(false); audioPausedRef.current = false; };
   
   const startAudioRecording = async () => {
     try {
@@ -316,17 +273,8 @@ export default function LegalTranscriptionSystem({ user }) {
       streamRef.current = stream;
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      let _blobCount = 0;
       processor.onaudioprocess = (e) => {
-        if (!isRecordingRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || audioPausedRef.current) {
-          // Throttled log so we can see WHY audio isn't being sent.
-          _blobCount++;
-          if (_blobCount % 50 === 0) {
-            console.log(`[DEBUG][FE] 🎤 audio NOT sent: recording=${isRecordingRef.current}, `
-              + `wsOpen=${wsRef.current?.readyState === WebSocket.OPEN}, paused=${audioPausedRef.current}`);
-          }
-          return;
-        }
+        if (!isRecordingRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || audioPausedRef.current) return;
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmData = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
@@ -336,11 +284,7 @@ export default function LegalTranscriptionSystem({ user }) {
         const base64Audio = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer)));
         try {
           wsRef.current.send(JSON.stringify({ type: 'audio_stream', session_id: sessionIdRef.current, audio_data: base64Audio, encoding: 'audio/wav', sample_rate: 16000 }));
-          _blobCount++;
-          if (_blobCount % 50 === 0) {
-            console.log(`[DEBUG][FE] 🎤 audio sent: blob #${_blobCount}, session=${sessionIdRef.current}`);
-          }
-        } catch (error) { console.error('[DEBUG][FE] ❌ Error sending audio:', error); }
+        } catch (error) { console.error('❌ Error sending audio:', error); }
       };
       source.connect(processor);
       processor.connect(audioContext.destination);
@@ -402,27 +346,26 @@ export default function LegalTranscriptionSystem({ user }) {
         speakerConfidence: 0,
       });
     });
-    // FRONTEND-ONLY save. We intentionally do NOT send anything to the
-    // backend here. The backend keeps its own raw (as-spoken) segments
-    // untouched, so live transcription never conflicts with an edit. The
-    // edited version lives only on the frontend (display + export). The
-    // final edited transcript will be synced to S3 once at End Session.
-    console.log(`[DEBUG][FE] 💾 saveTranscript (frontend-only): ${paras.length} paragraph(s) -> ${rebuilt.length} messages`);
     setMessages(rebuilt);
     setTranscript(paras.join(' ').replace(/\s+/g, ' ').trim());
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && sessionId) {
+      wsRef.current.send(JSON.stringify({
+        type: 'update_transcript',
+        session_id: sessionId,
+        paragraphs: paras,
+      }));
+    }
   };
 
-  // Toggle edit mode. Audio keeps running (transcription is not paused), so
-  // the mic/AudioContext never goes dormant. When LEAVING edit mode, we flag
-  // that the next incoming transcript segment should start a fresh paragraph,
-  // so new speech after an edit / AI draft doesn't merge into the edited text.
+  // Toggle edit mode. Entering edit auto-pauses audio (transcription stops,
+  // session persists); exiting edit resumes audio if a session is active.
   const toggleEditTranscript = () => {
     const entering = !isEditingTranscript;
-    if (!entering) {
-      // Leaving edit mode → next segment begins a new paragraph.
-      pendingParagraphBreakRef.current = true;
+    if (sessionActive && isRecording) {
+      if (entering) pauseAudioRecording();
+      else resumeAudioRecording();
     }
-    console.log(`[DEBUG][FE] ✏️ edit mode ${entering ? 'ENTER' : 'EXIT'} (pendingParaBreak=${pendingParagraphBreakRef.current})`);
     setIsEditingTranscript(entering);
   };
 

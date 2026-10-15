@@ -233,13 +233,9 @@ class VADService:
                         sample_rate=sample_rate,
                     )
 
-                    stream["_sent_count"] = stream.get("_sent_count", 0) + 1
-                    if stream["_sent_count"] % 10 == 0:
-                        print(f"[DEBUG][VAD-SEND] translate() ok -> Sarvam: count={stream['_sent_count']} "
-                              f"session={session_id}")
+                    logger.debug(f"Sent {len(pcm_data)} bytes PCM ({len(wav_data)} bytes WAV) for session={session_id}")
 
                 except Exception as e:
-                    print(f"[DEBUG][VAD-SEND] translate() EXCEPTION session={session_id}: {type(e).__name__}: {e}")
                     logger.error(f"Send error for session={session_id}: {e}")
                     stream["connection_active"] = False
                     # Re-queue the chunk for potential reconnect
@@ -273,17 +269,16 @@ class VADService:
         ws = stream["websocket"]
         callback = stream["event_callback"]
 
-        print(f"[DEBUG][VAD-LISTEN] listener STARTED session={session_id}")
         logger.info(f"Listener started for session={session_id}")
 
         try:
             # NOTE: Removed asyncio.timeout wrapper that was killing the listener after 300s
             async for message in ws:
-                print(f"[DEBUG][VAD-LISTEN] <- message from Sarvam session={session_id} type={type(message).__name__}")
                 if not stream["connection_active"]:
-                    print(f"[DEBUG][VAD-LISTEN] connection_active=False, breaking session={session_id}")
                     logger.info(f"Connection no longer active for session={session_id}")
                     break
+
+                logger.debug(f"Received message for session={session_id}: {type(message)}")
 
                 # Pass the message as-is to the callback (don't force JSON parse here)
                 # The callback (AudioStreamHandler) will handle normalization
@@ -293,19 +288,13 @@ class VADService:
                     except Exception as e:
                         logger.exception(f"Callback error for session={session_id}: {e}")
 
-            print(f"[DEBUG][VAD-LISTEN] 'async for' ENDED NORMALLY (Sarvam closed the stream) session={session_id}")
-
         except asyncio.CancelledError:
-            print(f"[DEBUG][VAD-LISTEN] listener CANCELLED session={session_id}")
             logger.info(f"Listener cancelled for session={session_id}")
 
         except Exception as e:
-            print(f"[DEBUG][VAD-LISTEN] listener EXCEPTION session={session_id}: {type(e).__name__}: {e}")
             logger.exception(f"Listener error for session={session_id}: {e}")
 
         finally:
-            print(f"[DEBUG][VAD-LISTEN] listener ENDED session={session_id} "
-                  f"(was_active={stream.get('connection_active')}, ending={stream.get('session_ending')})")
             # Stream closed unexpectedly or normally
             was_active = stream.get("connection_active", False)
             stream["connection_active"] = False

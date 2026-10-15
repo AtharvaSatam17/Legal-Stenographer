@@ -118,12 +118,9 @@ class RealTimeTranscriptionService:
         paragraphs = data.get('paragraphs')
         updated_transcript = data.get('transcript')
 
-        print(f"[DEBUG][SAVE] update_transcript received: session_id={session_id} "
-              f"paragraphs={len(paragraphs) if isinstance(paragraphs, list) else 'none'} "
-              f"legacy_string={'yes' if updated_transcript is not None else 'no'}")
+        logger.debug(f"UPDATE_TRANSCRIPT REQUEST: Session={session_id}")
 
         if not session_id or not self.session_manager.exists(session_id):
-            print(f"[DEBUG][SAVE] REJECTED: invalid session_id={session_id}")
             logger.warning(f"Invalid session for update: {session_id}")
             await websocket.send_text(json.dumps({
                 'type': 'error',
@@ -173,9 +170,6 @@ class RealTimeTranscriptionService:
             session["transcript_buffer"] = joined
             session["raw_transcript_buffer"] = joined
 
-            print(f"[DEBUG][SAVE] segments rebuilt: session_id={session_id} "
-                  f"clean_paras={len(clean_paras)} new_segments={len(rebuilt_segments)} "
-                  f"(all time anchors are None by design)")
             logger.info(f"Transcript updated from {len(clean_paras)} paragraph(s), {len(rebuilt_segments)} segments")
 
             await websocket.send_text(json.dumps({

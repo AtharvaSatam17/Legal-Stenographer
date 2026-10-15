@@ -233,6 +233,8 @@ export default function LegalTranscriptPanel({
   const handleSaveAll = () => {
     const next = commitCurrentEdit();
     const paras = next.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    console.log(`[DEBUG][FE][PANEL] Save clicked: selectedIndex=${selectedIndex} editorText="${editorText.slice(0, 40)}"`);
+    console.log(`[DEBUG][FE][PANEL] paragraphs leaving editor (${paras.length}):`, paras.map((p, i) => `${i}:"${p.slice(0, 40)}"`));
     onSave(paras);
     onToggleEdit();
   };
