@@ -15,6 +15,7 @@ from services.sarvam_service import SarvamService
 from services.vad_service import VADService
 from services.diarization_service import DiarizationService
 from services.s3_storage_service import S3StorageService
+from services.ai_drafting_service import AIDraftingService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -39,6 +40,9 @@ class RealTimeTranscriptionService:
 
         self.s3_storage_service = S3StorageService()
         self.session_manager = SessionManager()
+
+        # AI paragraph drafting (AWS Bedrock / Amazon Nova Pro)
+        self.ai_drafting_service = AIDraftingService()
 
         # Audio handler
         self.audio_handler = AudioStreamHandler(
@@ -114,9 +118,12 @@ class RealTimeTranscriptionService:
         paragraphs = data.get('paragraphs')
         updated_transcript = data.get('transcript')
 
-        logger.debug(f"UPDATE_TRANSCRIPT REQUEST: Session={session_id}")
+        print(f"[DEBUG][SAVE] update_transcript received: session_id={session_id} "
+              f"paragraphs={len(paragraphs) if isinstance(paragraphs, list) else 'none'} "
+              f"legacy_string={'yes' if updated_transcript is not None else 'no'}")
 
         if not session_id or not self.session_manager.exists(session_id):
+            print(f"[DEBUG][SAVE] REJECTED: invalid session_id={session_id}")
             logger.warning(f"Invalid session for update: {session_id}")
             await websocket.send_text(json.dumps({
                 'type': 'error',
@@ -166,6 +173,9 @@ class RealTimeTranscriptionService:
             session["transcript_buffer"] = joined
             session["raw_transcript_buffer"] = joined
 
+            print(f"[DEBUG][SAVE] segments rebuilt: session_id={session_id} "
+                  f"clean_paras={len(clean_paras)} new_segments={len(rebuilt_segments)} "
+                  f"(all time anchors are None by design)")
             logger.info(f"Transcript updated from {len(clean_paras)} paragraph(s), {len(rebuilt_segments)} segments")
 
             await websocket.send_text(json.dumps({
@@ -196,6 +206,69 @@ class RealTimeTranscriptionService:
                 'message': 'No transcript provided'
             }))
 
+    async def ai_draft_paragraph(self, websocket: WebSocket, data: Dict):
+        """
+        Reframe a single paragraph using AWS Bedrock (Amazon Nova Pro).
+
+        Request:  { type: "ai_draft", session_id, request_id, paragraph, instruction }
+        Response: { type: "ai_draft_result", request_id, draft }  on success
+                  { type: "ai_draft_error",  request_id, reason } on failure
+
+        The result is NOT persisted — the frontend drops it into the editor and
+        the user still clicks Save to commit. request_id lets the frontend match
+        the response to the paragraph it was editing.
+        """
+        session_id = data.get('session_id')
+        request_id = data.get('request_id')
+        paragraph = data.get('paragraph', '')
+        instruction = data.get('instruction', '')
+
+        # Session is optional for drafting (pure text op), but validate if given.
+        if session_id and not self.session_manager.exists(session_id):
+            await websocket.send_text(json.dumps({
+                'type': 'ai_draft_error',
+                'request_id': request_id,
+                'reason': 'invalid_session',
+            }))
+            return
+
+        if not self.ai_drafting_service.available:
+            await websocket.send_text(json.dumps({
+                'type': 'ai_draft_error',
+                'request_id': request_id,
+                'reason': 'ai_unavailable',
+                'message': 'AI drafting is not configured (missing AWS credentials or Bedrock access).',
+            }))
+            return
+
+        try:
+            logger.info(
+                f"AI draft requested (session={session_id}, request_id={request_id}, "
+                f"instruction='{self.sanitize_for_log(instruction, 80)}')"
+            )
+            draft = await self.ai_drafting_service.draft_paragraph(paragraph, instruction)
+            await websocket.send_text(json.dumps({
+                'type': 'ai_draft_result',
+                'request_id': request_id,
+                'draft': draft,
+            }))
+            logger.info(f"AI draft returned ({len(draft)} chars) for request_id={request_id}")
+        except RuntimeError as e:
+            reason = str(e)
+            logger.warning(f"AI draft failed (request_id={request_id}): {reason}")
+            await websocket.send_text(json.dumps({
+                'type': 'ai_draft_error',
+                'request_id': request_id,
+                'reason': reason,
+            }))
+        except Exception as e:
+            logger.exception(f"AI draft unexpected error (request_id={request_id}): {e}")
+            await websocket.send_text(json.dumps({
+                'type': 'ai_draft_error',
+                'request_id': request_id,
+                'reason': 'drafting_failed',
+            }))
+
     async def handle_websocket_message(self, websocket: WebSocket, message: str):
         """Handle different types of WebSocket messages for legal transcription."""
         try:
@@ -215,6 +288,8 @@ class RealTimeTranscriptionService:
                 await self.end_real_time_session(websocket, data)
             elif message_type == 'update_transcript':
                 await self.update_session_transcript(websocket, data)
+            elif message_type == 'ai_draft':
+                await self.ai_draft_paragraph(websocket, data)
             elif message_type == 'tag_speaker':
                 await self.tag_speaker(websocket, data)
             elif message_type == 'correct_speaker':

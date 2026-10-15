@@ -29,23 +29,31 @@ async def startup_event():
 @app.websocket("/ws/realtime")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("🔗 WebSocket connection accepted")
+    print("[DEBUG][WS] 🔗 WebSocket connection accepted")
 
     try:
         while True:
             message = await websocket.receive_text()
+            # Log the message type (not full audio payloads) so we can see the
+            # receive loop is alive and what it's processing.
+            try:
+                import json as _json
+                _mt = _json.loads(message).get("type", "?")
+            except Exception:
+                _mt = "unparseable"
+            if _mt != "audio_stream":
+                print(f"[DEBUG][WS] received message type='{_mt}'")
             await realtime_service.handle_websocket_message(websocket, message)
 
     except WebSocketDisconnect:
-        print("🔌 WebSocket disconnected")
+        print("[DEBUG][WS] 🔌 WebSocket DISCONNECTED (client closed or network drop)")
 
         # Cleanup all sessions attached to this websocket
-
         for session_id in realtime_service.session_manager.list_sessions():
             session = realtime_service.session_manager.get_session(session_id)
             if session and session.get("websocket") == websocket:
+                print(f"[DEBUG][WS] cleaning up session on disconnect: {session_id}")
                 await realtime_service._cleanup_session(session_id)
 
-
     except Exception as e:
-        print(f"❌ WebSocket error: {e}")
+        print(f"[DEBUG][WS] ❌ WebSocket error: {type(e).__name__}: {e}")

@@ -74,6 +74,8 @@ class AudioStreamHandler:
         audio_data = data.get("audio_data")
 
         if not session_id or not self.session_manager.exists(session_id):
+            print(f"[DEBUG][AUDIO] REJECTED: invalid/unknown session_id={session_id} "
+                  f"(exists={self.session_manager.exists(session_id) if session_id else 'no_id'})")
             await websocket.send_text(json.dumps({
                 "type": "error",
                 "message": "Invalid session"
@@ -83,24 +85,29 @@ class AudioStreamHandler:
         session = self.session_manager.get_session(session_id)
 
         if session.get("ending", False):
+            print(f"[DEBUG][AUDIO] DROPPED: session ending, session_id={session_id}")
             return
 
         if not session.get("vad_active"):
+            print(f"[DEBUG][AUDIO] DROPPED: vad_active=False, session_id={session_id}")
             return
 
         try:
             audio_buffer = base64.b64decode(audio_data)
 
             if len(audio_buffer) % 2 != 0:
+                print(f"[DEBUG][AUDIO] DROPPED: odd byte length {len(audio_buffer)}, session_id={session_id}")
                 return
 
-            # Track chunk count (debug logging at DEBUG level)
+            # Track chunk count
             if '_audio_chunk_count' not in session:
                 session['_audio_chunk_count'] = 0
             session['_audio_chunk_count'] += 1
 
-            if session['_audio_chunk_count'] % 50 == 0:
-                logger.debug(f"Audio chunks received: {session['_audio_chunk_count']} (size: {len(audio_buffer)} bytes)")
+            # Print a heartbeat every 25 blobs so we can see audio flowing in.
+            if session['_audio_chunk_count'] % 25 == 0:
+                print(f"[DEBUG][AUDIO] blobs in: count={session['_audio_chunk_count']} "
+                      f"last_size={len(audio_buffer)}B session_id={session_id}")
 
             session["current_chunk"].append(audio_buffer)
 
@@ -112,6 +119,7 @@ class AudioStreamHandler:
             )
 
         except Exception as e:
+            print(f"[DEBUG][AUDIO] ERROR processing audio for session_id={session_id}: {e}")
             logger.exception(f"Audio processing error: {e}")
             await websocket.send_text(json.dumps({
                 "type": "error",
@@ -140,15 +148,20 @@ class AudioStreamHandler:
         websocket = session["websocket"]
 
         try:
-            # Log raw event type for debugging (first few events per session)
-            event_count = session.get("_vad_event_count", 0)
-            session["_vad_event_count"] = event_count + 1
-            if event_count < 5:
-                logger.info(f"VAD event #{event_count} for session={session_id}: type={type(event).__name__}, "
-                           f"keys={list(event.keys()) if isinstance(event, dict) else 'N/A'}")
-
             # Get event type using normalizer
             event_type = _get(event, "type", "unknown")
+
+            # ---- RAW EVENT DUMP: print EVERYTHING Sarvam sends, every time ----
+            # This is the key debug line: it shows the type and raw content of
+            # every message from Sarvam, so no event is ever handled silently.
+            try:
+                _raw = event if isinstance(event, dict) else getattr(event, "__dict__", str(event))
+                _raw_str = str(_raw)
+            except Exception:
+                _raw_str = str(event)
+            print(f"[DEBUG][SARVAM-RAW] session={session_id} py_type={type(event).__name__} "
+                  f"event_type='{event_type}' speech_in_progress={session.get('speech_in_progress')} "
+                  f"raw={_raw_str[:300]}")
 
             # Handle synthetic events from VADService
             if event_type == "stream_closed":
@@ -175,14 +188,16 @@ class AudioStreamHandler:
             if event_type == "events":
                 event_data = _get(event, "data")
                 signal_type = _get(event_data, "signal_type")
+                print(f"[DEBUG][VAD-SIGNAL] session={session_id} signal_type='{signal_type}'")
 
                 if signal_type == "START_SPEECH":
                     session["speech_in_progress"] = True
-                    logger.debug(f"Speech started for session={session_id}")
+                    print(f"[DEBUG][VAD-SIGNAL] 🎙️ SPEECH STARTED session={session_id}")
 
                 elif signal_type == "END_SPEECH":
                     session["speech_in_progress"] = False
-                    logger.debug(f"Speech ended for session={session_id}")
+                    print(f"[DEBUG][VAD-SIGNAL] 🛑 SPEECH ENDED session={session_id} "
+                          f"current_chunk_len={len(session.get('current_chunk', []))}")
 
                     if session["current_chunk"]:
                         await self._process_vad_chunk(session_id)
@@ -207,12 +222,27 @@ class AudioStreamHandler:
                     transcript = transcript.strip()
 
                 if transcript:
+                    print(f"[DEBUG][SARVAM] ✅ data event WITH TEXT: session={session_id} "
+                          f"transcript='{transcript[:80]}' (len={len(transcript)})")
                     await self._handle_transcript(session_id, transcript, event_data)
+                else:
+                    # Dump the raw event_data so we can see WHY it's empty (maybe
+                    # the text lives in another field, or there's an error).
+                    try:
+                        _ed = event_data if isinstance(event_data, dict) else getattr(event_data, "__dict__", str(event_data))
+                    except Exception:
+                        _ed = str(event_data)
+                    print(f"[DEBUG][SARVAM] ⚠️ EMPTY transcript — not handled, session={session_id} "
+                          f"raw_data={str(_ed)[:300]}")
 
             else:
-                logger.debug(f"Unknown event type '{event_type}' for session={session_id}")
+                print(f"[DEBUG][SARVAM-OTHER] UNHANDLED event_type='{event_type}' session={session_id} "
+                      f"(this event produced no transcript and no VAD signal)")
 
         except Exception as e:
+            print(f"[DEBUG][VAD] ❌ handle_vad_event EXCEPTION session_id={session_id}: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             logger.exception(f"VAD handle_vad_event error for session={session_id}: {e}")
 
     # ============================================================
@@ -232,13 +262,20 @@ class AudioStreamHandler:
         """
         session = self.session_manager.get_session(session_id)
         if not session:
+            print(f"[DEBUG][TRANSCRIPT] NO SESSION for session_id={session_id} — dropping transcript")
             return
 
         # Phase 1, Step 5 — reject late-arriving transcripts after end_session
         if session.get("ending", False):
+            print(f"[DEBUG][TRANSCRIPT] session ending — dropping transcript, session_id={session_id}")
             return
 
         websocket = session["websocket"]
+
+        _prev = session.get("segments", [])
+        print(f"[DEBUG][TRANSCRIPT] handling: session_id={session_id} text='{transcript[:60]}' "
+              f"existing_segments={len(_prev)} "
+              f"last_seg_end={_prev[-1].get('end_time_seconds') if _prev else 'none'}")
 
         # Generate a stable segment_id for this transcript segment
         segment_id = f"seg_{uuid.uuid4().hex[:12]}"
@@ -275,23 +312,28 @@ class AudioStreamHandler:
         metrics = _get(event_data, "metrics")
         audio_end_time_seconds = _get(metrics, "audio_duration") if metrics else None
 
-        # Derive start_time from the previous segment's end time
+        # Derive start_time from the previous segment's end time.
+        # NOTE: segments created by a transcript edit (and paragraph-break
+        # markers) carry end_time_seconds=None, so we must coalesce None->0.0
+        # everywhere here, otherwise the arithmetic below raises TypeError and
+        # the segment is silently dropped (never broadcast). This is what made
+        # transcription appear "dead" after editing/AI drafting + save.
         prev_segments = session.get("segments", [])
-        if prev_segments and prev_segments[-1].get("end_time_seconds") is not None:
-            start_time_seconds = prev_segments[-1]["end_time_seconds"]
-        else:
-            start_time_seconds = 0.0
+        prev_end_raw = prev_segments[-1].get("end_time_seconds") if prev_segments else None
+        prev_end_val = prev_end_raw if isinstance(prev_end_raw, (int, float)) else 0.0
+
+        start_time_seconds = prev_end_val
 
         # If the SDK didn't provide audio_duration, fall back to wall-clock offset
         if audio_end_time_seconds is None:
             end_time_seconds = (datetime.now() - session["start_time"]).total_seconds()
-            start_time_seconds = prev_segments[-1].get("end_time_seconds", 0.0) if prev_segments else 0.0
+            start_time_seconds = prev_end_val
         else:
             end_time_seconds = audio_end_time_seconds
 
         # Monotonicity assertion for audio-time anchors
         if prev_segments:
-            prev_end = prev_segments[-1].get("end_time_seconds", 0.0)
+            prev_end = prev_end_val
             if start_time_seconds < prev_end - 0.01:  # small epsilon for float precision
                 logger.warning(
                     f"MONOTONICITY WARNING: New segment start_time_seconds={start_time_seconds:.3f} "
@@ -381,7 +423,14 @@ class AudioStreamHandler:
             "source": "vad_stream",
         }
 
-        await websocket.send_text(json.dumps(response))
+        print(f"[DEBUG][TRANSCRIPT] BROADCASTING transcription_update: session_id={session_id} "
+              f"segment_id={segment_id} text='{transcript[:60]}' now_segments={len(session['segments'])}")
+        try:
+            await websocket.send_text(json.dumps(response))
+            print(f"[DEBUG][TRANSCRIPT] SENT ok to frontend, session_id={session_id}")
+        except Exception as e:
+            print(f"[DEBUG][TRANSCRIPT] SEND FAILED session_id={session_id}: {type(e).__name__}: {e}")
+            raise
 
     # ============================================================
     # VAD CHUNK PROCESSING
