@@ -165,10 +165,43 @@ class RealTimeTranscriptionService:
                     "end_time_seconds": None,
                 })
 
+            # Trailing paragraph-break marker. Mirrors the frontend fix: any
+            # segment transcribed after this edit (once audio resumes) is
+            # appended after these rebuilt segments. Without a trailing marker
+            # that new segment would merge into the last edited paragraph both
+            # in the petition prose and in the session_state resync payload the
+            # frontend rebuilds from. The marker gives post-edit live segments a
+            # clean paragraph boundary. format_petition_prose / buildParagraphs
+            # drop empty trailing groups, so no blank paragraph is produced.
+            if rebuilt_segments:
+                rebuilt_segments.append({
+                    "segment_id": f"edit_break_tail_{uuid.uuid4().hex[:6]}",
+                    "is_paragraph_break": True,
+                    "transcript": "",
+                    "timestamp": datetime.now().isoformat(),
+                    "start_time_seconds": None,
+                    "end_time_seconds": None,
+                })
+
+            # Carry forward the last real audio-time anchor from the segments
+            # being replaced, so a live segment transcribed after this edit can
+            # still compute a monotonic start_time instead of resetting to 0.0
+            # and logging a spurious MONOTONICITY warning in _handle_transcript.
+            prev_end_anchor = None
+            for seg in session.get("segments", []):
+                end_anchor = seg.get("end_time_seconds")
+                if end_anchor is not None:
+                    prev_end_anchor = end_anchor
+            if prev_end_anchor is not None and rebuilt_segments:
+                rebuilt_segments[-1]["end_time_seconds"] = prev_end_anchor
+
             session["segments"] = rebuilt_segments
             joined = " ".join(clean_paras).strip()
             session["transcript_buffer"] = joined
-            session["raw_transcript_buffer"] = joined
+            # NOTE: raw_transcript_buffer is the verbatim STT output and is
+            # documented as "never mutated by corrections" (see session_manager).
+            # The user's edits go into transcript_buffer/segments only; the raw
+            # buffer is left untouched to preserve the original verbatim record.
 
             logger.info(f"Transcript updated from {len(clean_paras)} paragraph(s), {len(rebuilt_segments)} segments")
 
